@@ -1,0 +1,44 @@
+# Findings (2026-11-25)
+
+Measured with Playwright Firefox 159 and Chromium on desktop Linux. One title, episode 1, dub. Nothing here was run on a phone or against a Chromecast.
+
+## Decision: direct handoff of the player page. No home helper.
+
+Send Chrome the player **iframe's** URL (`https://embed.settlar.io/embed/v1?t=…`), not the media URL.
+
+- Opened cold in headed Chromium (fresh profile, no referrer) it returned 200 and played at 1920 px wide.
+- It showed the player's own **"Start casting"** button, and loaded Google's Cast sender SDK. The player's code uses the default media receiver (`CC1AD845`).
+- In that cold load the only hosts contacted were `embed.settlar.io` and Cloudflare's beacon (plus gstatic for Cast). The ad scripts are loaded by the outer page, not by the embed.
+- The player's host guard script explicitly permits `embed.settlar.io`; nothing is bypassed.
+- It keeps subtitles and quality choice, which a bare playlist in Chrome's player would not.
+- The top page can read the iframe's `src`, so no request sniffing is needed.
+
+## Servers
+
+| Server | iframe | Stream as seen in the player frame |
+|---|---|---|
+| default | `embed.settlar.io/embed/v1?t=…` | `media.settlar.io/v1/object/v2.<token>` or `embed.settlar.io/backup/v1/h/<token>.m3u8` |
+| Backup | `embed.settlar.io/embed/v1?t=…` (different token) | `embed.settlar.io/backup/v1/h/…` (playlist), `/s/…` (segment), `/v/…` (subtitles) |
+| Beta | `beta.cno.to/watch/…&embed=…`, not sandboxed | `beta.cno.to/hls/…`, segments on `flashpod.top` |
+
+Beta was not opened cold in Chrome; whether it can cast, and whether it shows ads, is unknown. `megaplay.buzz` is allowed by the site's CSP but was not seen.
+
+## Stream
+
+- HLS. `media.settlar.io` playlists have **no file extension**, so v3's `\.(m3u8|mp4)` pattern could not match them. Type: `application/vnd.apple.mpegurl`. Segments: `video/mp2t`, `…/v3.<token>.ts`.
+- The playlist is fetched from the embed frame itself, not a Worker. An `hls.worker` exists, but the playlist and segments showed up in Resource Timing. The first matching entry is the master; the last is a variant or subtitle playlist.
+- Tokens are in the URL. The embed session's `expiresAt` was about 6 hours ahead. Whether they are bound to an IP address was not tested.
+- No Referer needed: the bare master URL played in headed Chromium with no referrer. (Headed Firefox downloads it instead; it has no native HLS.)
+- `curl` got Cloudflare's "you have been blocked" page (403) for playlist and segment, **with and without** Referer/Origin. Headless Chromium got the same. So the block is about the client, not the Referer.
+- Consequence: VLC, `catt`, or a proxy are likely to be refused too (VLC itself was not tested). Getting them through would mean disguising the client to defeat that block, which this project does not do. The player's Cast button is the supported route.
+- Not known: whether the Chromecast's own requests are accepted. The player is built to cast, so it should be, but only a real device can show it.
+
+## Why v3 would have failed, and v2's badge
+
+- v3: the extension pattern above, plus it navigated from inside the player frame. That iframe is sandboxed `allow-scripts allow-same-origin allow-presentation allow-orientation-lock`, i.e. without top-navigation or popups. Inferred, not proven: desktop Firefox refuses `intent:` everywhere as an unknown protocol, so the sandbox's effect could not be isolated.
+- v2: **cause not found.** Its source was not in the handoff. A badge rebuilt from the description, injected without Tampermonkey, was visible in both frames, was never removed over ~30 s, and raised no error. That argues against the site removing it, and points at the script or Tampermonkey.
+- Seen with ads unblocked: a full-page ad layer (`#dontfoid`) covered the badge in hit tests and swallowed clicks. v4's fallback uses a modal `<dialog>` (top layer), which stays above it.
+
+## Not tested
+
+Real Tampermonkey (desktop or Android), Firefox Android → Chrome `intent://`, Chrome for Android, an actual Chromecast, and the Beta server cold.

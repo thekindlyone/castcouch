@@ -1,0 +1,15 @@
+{
+  "name": "castcouch",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "harness": "node harness/server.mjs"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "hls.js": "^1.7.4",
+    "playwright": "^1.65.1"
+  },
+  "type": "module",
+  "private": true
+}

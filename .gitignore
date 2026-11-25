@@ -1,0 +1,4 @@
+node_modules/
+harness/media/
+*.png
+capture*.json
