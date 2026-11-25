@@ -94,5 +94,8 @@ The receiver (Google default, `CC1AD845`) runs on another origin, so each server
 | Polaris | **200, plays with hls.js (4 of 4 titles, 1080p)** | 200 | MPEG-TS behind a 64-byte PNG header, `image/png` |
 
 - Likely cause: the default server only answers the cinejoy page itself. Not worked around here; that would mean faking the page's identity.
-- Polaris is the only candidate. Risk: Chromium's native HLS player did not play it (the PNG header); whether the Chromecast's player skips the header is unknown.
+- Polaris was the only candidate, and **the user reports it sticks on the Cast icon too**.
+- Follow-up, one title, Chromium's native HLS player (control: the plain harness stream played): Polaris direct failed (error 4). The same playlist relayed by a local server, with segment URLs rewritten to its own `/s.ts`, **played, both with and without the PNG header**. So the header alone is not the cause; the relay also changed the segments' address and origin, and which of these matters was not isolated. Chromium is not the TV, so the TV's cause is still unproven.
+- That relay was a plain Node client with no added headers; playlist and segments answered 200. So a home relay for Polaris looks feasible without disguising anything. Not tested against the TV.
+- The TV (65PUT7908/79) is a Google TV model according to Philips' product page title; its browser options were not tested.
 - The choice resets on reload, but cinejoy has Settings → Playback → Server Order (stored per browser).
