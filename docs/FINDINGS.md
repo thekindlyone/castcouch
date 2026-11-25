@@ -21,7 +21,23 @@ Send Chrome the player **iframe's** URL (`https://embed.settlar.io/embed/v1?t=�
 | Backup | `embed.settlar.io/embed/v1?t=…` (different token) | `embed.settlar.io/backup/v1/h/…` (playlist), `/s/…` (segment), `/v/…` (subtitles) |
 | Beta | `beta.cno.to/watch/…&embed=…`, not sandboxed | `beta.cno.to/hls/…`, segments on `flashpod.top` |
 
-Beta was not opened cold in Chrome; whether it can cast, and whether it shows ads, is unknown. `megaplay.buzz` is allowed by the site's CSP but was not seen.
+Whether Beta can cast is unknown. `megaplay.buzz` is allowed by the site's CSP but was not seen.
+
+## Pop-ups (headed Chromium, fresh profile, no ad blocker, nothing blocked)
+
+Clicked/tapped the video and the player's buttons, with a mouse and with emulated touch, watching for new tabs and main-frame navigation.
+Playwright's Chromium starts with no extensions and with Chrome's pop-up blocker off.
+
+| Page | Clicks | Pop-ups | Other |
+|---|---|---|---|
+| Control: the normal anipm.pk page | 8 | **2** (`velvetcairns.com`), no navigation away | ad scripts ran (`acscdn.com`, `rapidadexchange.com`), so nothing was blocking ads |
+| default player page | 15 mouse, 11 touch | 0 | no navigation; hosts: `embed.settlar.io`, Cloudflare beacon, gstatic (Cast) |
+| Backup player page | 15 mouse, 11 touch | 0 | as above |
+| Beta player page | 13 mouse, 11 touch | 0 | page address was (re)loaded 3 times on its own host; contacted `ap.batspathes.com`, purpose unknown |
+
+Play/pause worked on every page. None of the scripts loaded by the default/Backup pages call `window.open` or contain the ad library's names,
+and the embed's CSP only lets scripts load from itself and Google's Cast SDK. Beta's scripts do call `window.open`, in the instances seen for menu items and links.
+Limits: one title, short sessions, a desktop user agent. Ads can vary by device, country and time, so Android Chrome still needs checking.
 
 ## Stream
 
@@ -41,4 +57,4 @@ Beta was not opened cold in Chrome; whether it can cast, and whether it shows ad
 
 ## Not tested
 
-Real Tampermonkey (desktop or Android), Firefox Android → Chrome `intent://`, Chrome for Android, an actual Chromecast, and the Beta server cold.
+Real Tampermonkey (desktop or Android), Firefox Android → Chrome `intent://`, Chrome for Android, and an actual Chromecast.

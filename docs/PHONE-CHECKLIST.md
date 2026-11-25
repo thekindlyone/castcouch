@@ -3,7 +3,7 @@
 1. Remove the old "Send to Chrome" script from Tampermonkey.
 2. Open the install URL from the README in Firefox; Tampermonkey should offer to install v4.0.0.
    If it shows plain text instead: Tampermonkey → Utilities → Install from URL.
-3. Open an episode, wait until it plays, and use the **Backup** or default server first.
+3. Open an episode, wait until it plays, and use the default or **Backup** server (these had no pop-ups in testing; Beta is less certain).
 4. Tampermonkey menu: expect *Open player in Chrome*, *Open player in Chrome (tap a link)* and, from the player frame, *[player] Copy stream URL*.
 5. Tap *Open player in Chrome*. Chrome opens with the player → go to 7.
 6. Nothing happened? Tap *…(tap a link)*, then the blue link. Still nothing? Use *Copy player link* and paste it into Chrome.
