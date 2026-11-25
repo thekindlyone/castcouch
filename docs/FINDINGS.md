@@ -80,3 +80,19 @@ The v4.1.0 button and pause in real Tampermonkey on the phone, where the v2 badg
 - Playback position is not carried over; Chrome starts where Chrome last was, or at the beginning.
 - Button: top right, the empty corner at 360, 412 and 860 px wide. Visible when paused or within 4 s of a touch. Firefox covers everything outside a fullscreen element, so in fullscreen the button is moved inside it. Pausing held for 6.5 s on a film and an episode, and in fullscreen on a film.
 - Not tested: the phone, a real Chromecast, other servers.
+
+## Casting on the real TV (v4.2.0)
+
+Reported by the user: Firefox → Chrome works and the Cast session starts (title and poster appear), but the TV stays on the Cast icon.
+The receiver (Google default, `CC1AD845`) runs on another origin, so each server was tested from a foreign-origin page in headed Chromium. Two titles per server (Polaris: four). `localhost` stood in for the receiver; the sender's actual load request was not captured.
+
+| Server | Foreign-origin fetch | Opened cold | Segments |
+|---|---|---|---|
+| Light (default) | fails | 404 | fMP4 named `.png` |
+| Nebula | fails | 200 | fMP4 (`image/jpeg` playlist) |
+| Sirius | fails | 404 | not checked |
+| Polaris | **200, plays with hls.js (4 of 4 titles, 1080p)** | 200 | MPEG-TS behind a 64-byte PNG header, `image/png` |
+
+- Likely cause: the default server only answers the cinejoy page itself. Not worked around here; that would mean faking the page's identity.
+- Polaris is the only candidate. Risk: Chromium's native HLS player did not play it (the PNG header); whether the Chromecast's player skips the header is unknown.
+- The choice resets on reload, but cinejoy has Settings → Playback → Server Order (stored per browser).
