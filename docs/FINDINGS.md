@@ -69,3 +69,14 @@ Limits: one title, short sessions, a desktop user agent. Ads can vary by device,
 ## Not tested
 
 The v4.1.0 button and pause in real Tampermonkey on the phone, where the v2 badge failed for an unknown reason. The button and pause on the Beta server's own player (`beta.cno.to`).
+
+# cinejoy.pk (2026-11-25, v4.2.0)
+
+- No iframe: the watch page is the player (`/watch/movie/<id>`, `/watch/tv/<id>/<season>/<episode>`), an hls.js `blob:` video filling the window. The site sends `frame-ancestors 'none'`. Tested server: the default one only.
+- **Handed to Chrome: the watch page URL.** Opened cold in headed, unblocked Chromium it played and showed its own "Cast to Device" button, with Google's Cast SDK loaded and reporting `NO_DEVICES_AVAILABLE` (no Chromecast on the test machine).
+- The bare stream (`lightspeed.st/hls/…/master.m3u8`, segments named `.png`) returned 404 when opened cold in Chromium; why was not investigated. Not used.
+- Pop-ups: 0 in 7 mouse clicks and 7 emulated taps, nothing blocked, no new tabs. Unlike anipm's embed, this is the full site page, and the site's own notice says "Ads are disabled for now", so ads may come back, and would then appear in Chrome. Player code is obfuscated, so it was not checked for pop-up calls.
+- The watch page reloaded its own address a few times during load in Chromium.
+- Playback position is not carried over; Chrome starts where Chrome last was, or at the beginning.
+- Button: top right, the empty corner at 360, 412 and 860 px wide. Visible when paused or within 4 s of a touch. Firefox covers everything outside a fullscreen element, so in fullscreen the button is moved inside it. Pausing held for 6.5 s on a film and an episode, and in fullscreen on a film.
+- Not tested: the phone, a real Chromecast, other servers.

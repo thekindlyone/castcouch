@@ -9,13 +9,13 @@ before(async () => { stop = start({ sitePort: 8011, playerPort: 8012 }); browser
 after(async () => { await browser?.close(); await stop?.(); });
 
 // Stand-in for Tampermonkey: same code, in every frame, commands recorded per frame.
-async function open(query = '') {
+async function open(query = '', path = '') {
   const ctx = await browser.newContext({ viewport: { width: 412, height: 860 } });
   await ctx.addInitScript(`window.__cmd={};window.__clip=null;
     window.GM_registerMenuCommand=(n,f)=>{__cmd[n]=f};window.GM_setClipboard=t=>{__clip=t};
     (()=>{${harnessScript(P, 'localhost:8011')}\n})();`);
   const page = await ctx.newPage();
-  await page.goto(SITE + '?' + query);
+  await page.goto(SITE + path + '?' + query);
   const frame = page.frames().find(f => f.url().includes(P));
   return { ctx, page, frame };
 }
@@ -116,6 +116,54 @@ test('pause: holds a player that starts late, until the viewer touches it; ignor
   await frame.evaluate(() => document.querySelector('video').play().catch(() => {}));
   await page.waitForTimeout(300);
   assert.equal(await frame.evaluate(() => document.querySelector('video').paused), false);
+  await ctx.close();
+});
+
+test('page player: hands over the watch page, pauses it, and survives a tap-to-toggle player', async () => {
+  const { ctx, page } = await open('', 'watch/tv/1/2/3');
+  await playing(page);
+  await page.mouse.move(100, 400);
+  const btn = page.locator(BTN);
+  await btn.waitFor({ timeout: 3000 });
+  assert.equal(await btn.getAttribute('href'), 'intent://localhost:8011/watch/tv/1/2/3?#Intent;scheme=http;package=com.android.chrome;end'.replace('?#', '#'));
+  await btn.click({ timeout: 3000 });
+  await page.waitForTimeout(1500);
+  assert.equal(await page.evaluate(() => document.querySelector('video').paused), true);
+  assert.equal(await page.evaluate(() => __cmd['Open player in Chrome']()), await btn.getAttribute('href'));
+  await ctx.close();
+});
+
+test('page player: button hides while watching, returns on touch and when paused, gone off the watch page', async () => {
+  const { ctx, page } = await open('', 'watch/movie/1');
+  await playing(page);
+  const btn = page.locator(BTN);
+  await btn.waitFor({ state: 'detached', timeout: 8000 });
+  await page.mouse.move(120, 420);
+  await btn.waitFor({ timeout: 500 });
+  await btn.waitFor({ state: 'detached', timeout: 8000 });
+  await page.evaluate(() => document.querySelector('video').pause());
+  await btn.waitFor({ timeout: 2500 });
+  await page.evaluate(() => history.pushState(null, '', '/movie/1'));
+  await btn.waitFor({ state: 'detached', timeout: 2500 });
+  await ctx.close();
+});
+
+test('page player: button is on top and works in fullscreen, and after leaving it', async () => {
+  const { ctx, page } = await open('', 'watch/movie/1');
+  await playing(page);
+  const onTop = () => page.evaluate(s => { const r = document.querySelector(s)?.getBoundingClientRect(); return !!r && document.elementFromPoint(r.x + 20, r.y + 15) === document.querySelector(s); }, BTN);
+  await page.mouse.dblclick(100, 300);
+  await page.waitForFunction(() => document.fullscreenElement);
+  await page.waitForTimeout(500);
+  await page.mouse.move(120, 320);
+  assert.equal(await onTop(), true);
+  await page.evaluate(s => { document.querySelector(s).click(); }, BTN);
+  await page.waitForTimeout(500);
+  assert.equal(await page.evaluate(() => document.querySelector('video').paused), true);
+  // Following the link makes Firefox leave fullscreen by itself.
+  await page.waitForFunction(() => !document.fullscreenElement);
+  await page.waitForTimeout(500);
+  assert.equal(await onTop(), true);
   await ctx.close();
 });
 

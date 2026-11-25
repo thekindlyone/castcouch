@@ -21,6 +21,7 @@ export function makeMedia() {
 export function harnessScript(playerHost, siteHost) {
   return fs.readFileSync(path.join(root, 'src/send-to-chrome.user.js'), 'utf8')
     .replace(/^const PLAYER_HOSTS = .*$/m, `const PLAYER_HOSTS = ['${playerHost}'];`)
+    .replace(/^const PAGE_PLAYER_HOSTS = .*$/m, `const PAGE_PLAYER_HOSTS = ['${siteHost}'];`)
     .replace(/^\/\/ @(downloadURL|updateURL).*\n/gm, '')
     .replace(/^\/\/ @name .*$/m, '// @name         Send to Chrome (harness)')
     .replace(/^(\/\/ @match .*\n)+/m, `// @match        http://${siteHost.split(':')[0]}/*\n// @match        http://${playerHost.split(':')[0]}/*\n`);
@@ -43,6 +44,13 @@ ${q.get('header') ? '<header style="position:fixed;top:0;left:0;right:0;height:5
 <nav style="position:fixed;bottom:0;left:0;right:0;height:60px;background:#222;z-index:2147483647"></nav>
 ${q.get('overlay') ? '<div id="overlay" style="position:fixed;inset:0;z-index:2147483647"></div>' : ''}`;
 
+// A site that is its own player: full-window hls.js video that toggles on tap, like cinejoy.
+const pagePlayer = player => `<!doctype html><meta name=viewport content="width=device-width"><title>Watch</title><body style="margin:0;background:#000"><div id="box">
+<video muted autoplay loop playsinline style="position:fixed;inset:0;width:100%;height:100%;z-index:2147483647"></video></div><script src="http://${player}/hls.js"></script><script>
+const v=document.querySelector('video'),h=new Hls({enableWorker:false});h.loadSource('http://${player}/v1/object/v2.master.abc');h.attachMedia(v);
+document.addEventListener('dblclick',()=>box.requestFullscreen());
+document.addEventListener('click',()=>v.paused?v.play():v.pause());</script>`;
+
 function send(res, status, type, body) { res.writeHead(status, { 'content-type': type, 'access-control-allow-origin': '*' }); res.end(body); }
 
 export function start({ sitePort = 8001, playerPort = 8002, bind = '127.0.0.1', siteHost, playerHost } = {}) {
@@ -52,6 +60,7 @@ export function start({ sitePort = 8001, playerPort = 8002, bind = '127.0.0.1', 
     const player = playerHost ?? (name === 'localhost' ? '127.0.0.1' : name) + ':' + playerPort;
     if (kind === 'site') {
       if (u.pathname === '/send-to-chrome.user.js') return send(res, 200, 'text/javascript', harnessScript(player, req.headers.host));
+      if (u.pathname.startsWith('/watch/')) return send(res, 200, 'text/html', pagePlayer(player));
       return send(res, 200, 'text/html', sitePage(player, u.searchParams));
     }
     if (u.pathname === '/embed/v1') return send(res, 200, 'text/html', playerPage(u.searchParams));

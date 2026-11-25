@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Send to Chrome
 // @namespace    https://github.com/thekindlyone/castcouch
-// @version      4.1.0
-// @description  Opens the embedded video player in Chrome for Android, where it can be cast. Adds a Cast button to the page header.
+// @version      4.2.0
+// @description  Opens the video player in Chrome for Android, where it can be cast. Adds a Cast button to the page.
 // @match        *://anipm.pk/*
 // @match        *://*.anipm.pk/*
 // @match        *://ani.pm/*
@@ -11,6 +11,8 @@
 // @match        *://*.ani.nz/*
 // @match        *://ani.vg/*
 // @match        *://*.ani.vg/*
+// @match        *://cinejoy.pk/*
+// @match        *://www.cinejoy.pk/*
 // @match        *://embed.settlar.io/*
 // @match        *://beta.cno.to/*
 // @run-at       document-start
@@ -23,6 +25,8 @@
 
 // Hosts (with port, if any) that serve the player inside an <iframe>. The harness rewrites this line.
 const PLAYER_HOSTS = ['embed.settlar.io', 'beta.cno.to', 'megaplay.buzz'];
+// Sites whose own watch page is the player (full-window <video>, no iframe). Harness rewrites this too.
+const PAGE_PLAYER_HOSTS = ['cinejoy.pk', 'www.cinejoy.pk'];
 
 function parse(url) {
   try { return new URL(url); } catch { return null; }
@@ -32,6 +36,14 @@ const isHttp = u => !!u && (u.protocol === 'https:' || u.protocol === 'http:');
 function isPlayerUrl(url) {
   const u = parse(url);
   return isHttp(u) && PLAYER_HOSTS.includes(u.host) && u.pathname !== '/';
+}
+
+// The watch page itself, without its fragment, or null if this is not a watch page.
+function pagePlayerUrl(href) {
+  const u = parse(href);
+  if (!isHttp(u) || !PAGE_PLAYER_HOSTS.includes(u.host) || !/^\/watch\/./.test(u.pathname)) return null;
+  u.hash = '';
+  return u.href;
 }
 
 // frames: [{src, area}] -> src of the largest player frame, or null.
@@ -73,52 +85,76 @@ function findPlayerFrame() {
   const src = pickPlayer(frames);
   return src && frames.filter(f => f.src === src).sort((a, b) => b.area - a.area)[0].el;
 }
-const findPlayer = () => findPlayerFrame()?.src ?? null;
+const findPlayer = () => pagePlayerUrl(location.href) ?? findPlayerFrame()?.src ?? null;
 
-// The player is cross-origin, so ask the copy of this script running inside it to pause.
-const PAUSE = 'send-to-chrome:pause';
-function pausePlayer() {
-  findPlayerFrame()?.contentWindow?.postMessage(PAUSE, '*');
+// Pauses this document's videos, and keeps them paused for a few seconds in case the player was still
+// loading or reacts to the same tap. Any later touch or key gives control back to the viewer.
+let holdUntil = 0;
+function pauseHere() {
+  holdUntil = Date.now() + 5000;
+  document.querySelectorAll('video').forEach(v => v.pause());
 }
-
-function listenForPause() {
-  let holdUntil = 0; // also catches a player that was still loading when the button was tapped
-  window.addEventListener('message', e => {
-    if (e.source !== window.parent || e.data !== PAUSE) return;
-    holdUntil = Date.now() + 5000;
-    document.querySelectorAll('video').forEach(v => v.pause());
-  });
+function watchHold() {
   document.addEventListener('play', e => { if (Date.now() < holdUntil) e.target.pause?.(); }, true);
   for (const t of ['pointerdown', 'keydown']) document.addEventListener(t, e => { if (e.isTrusted) holdUntil = 0; }, true);
 }
 
+// A framed player is cross-origin, so ask the copy of this script running inside it to pause.
+const PAUSE = 'send-to-chrome:pause';
+function pausePlayer() {
+  if (pagePlayerUrl(location.href)) pauseHere();
+  else findPlayerFrame()?.contentWindow?.postMessage(PAUSE, '*');
+}
+function listenForPause() {
+  watchHold();
+  window.addEventListener('message', e => { if (e.source === window.parent && e.data === PAUSE) pauseHere(); });
+}
+
 // A plain link, so the launch comes from a real tap. It is a popover: shown in the top layer (above any
-// z-index) and kept outside <body>, so the site does not re-render it. Sits in the gap after the logo.
+// z-index) and kept outside <body> except in fullscreen, so the site does not re-render it.
 let button = null;
-function updateButton() {
-  const frame = findPlayerFrame();
-  if (!frame) { button?.remove(); return; }
-  if (!button) {
-    button = document.createElement('a');
-    button.textContent = 'Cast';
-    button.title = 'Open player in Chrome';
-    button.setAttribute('popover', 'manual');
-    button.style.cssText = 'position:fixed;inset:auto;top:10px;left:124px;width:57px;height:36px;margin:0;padding:0;border:0;border-radius:18px;background:#1a73e8;color:#fff;font:600 14px/36px sans-serif;text-align:center;text-decoration:none;box-sizing:border-box;overflow:hidden;z-index:2147483647';
-    button.addEventListener('click', pausePlayer);
-  }
-  button.href = toChromeIntent(frame.src);
-  if (!button.isConnected) document.documentElement.append(button);
-  if (button.showPopover && !button.matches(':popover-open')) button.showPopover();
-  // Never sit on the video (landscape, theatre modes).
-  button.style.visibility = 'visible';
+let lastTouch = 0;
+function makeButton() {
+  const b = document.createElement('a');
+  b.textContent = 'Cast';
+  b.title = 'Open player in Chrome';
+  b.setAttribute('popover', 'manual');
+  b.style.cssText = 'position:fixed;inset:auto;top:10px;width:57px;height:36px;margin:0;padding:0;border:0;border-radius:18px;background:#1a73e8;color:#fff;font:600 14px/36px sans-serif;text-align:center;text-decoration:none;box-sizing:border-box;overflow:hidden;z-index:2147483647';
+  b.addEventListener('click', pausePlayer);
+  return b;
+}
+
+// Full-window player: behave like its controls, i.e. visible when paused or recently touched.
+function pageButtonVisible() {
+  const v = document.querySelector('video');
+  return !v || v.paused || Date.now() - lastTouch < 4000;
+}
+
+// Framed player: hide only if the video itself is what is drawn under the button.
+function coversFrame(frame) {
   const b = button.getBoundingClientRect(), f = frame.getBoundingClientRect();
-  const overlaps = b.left < f.right && b.right > f.left && b.top < f.bottom && b.bottom > f.top;
-  // Scrolled under the fixed header is fine: only hide if the video is actually what is drawn there.
-  if (overlaps) {
-    button.style.visibility = 'hidden';
-    const under = document.elementFromPoint((b.left + b.right) / 2, (b.top + b.bottom) / 2);
-    if (under !== frame) button.style.visibility = 'visible';
-  }
+  if (b.left >= f.right || b.right <= f.left || b.top >= f.bottom || b.bottom <= f.top) return false;
+  button.style.visibility = 'hidden';
+  return document.elementFromPoint((b.left + b.right) / 2, (b.top + b.bottom) / 2) === frame;
+}
+
+function updateButton() {
+  const pageUrl = pagePlayerUrl(location.href);
+  const frame = pageUrl ? null : findPlayerFrame();
+  const url = pageUrl ?? frame?.src;
+  if (!url || (pageUrl && !pageButtonVisible())) { button?.remove(); return; }
+  button ??= makeButton();
+  button.style.left = pageUrl ? 'auto' : '124px'; // framed: gap between the logo and the header icons
+  button.style.right = pageUrl ? '16px' : 'auto';
+  button.href = toChromeIntent(url);
+  // Firefox draws a fullscreen element over everything outside it, even popovers. A fullscreen <video>
+  // or <iframe> cannot hold the button, so there it is simply not available.
+  const fs = pageUrl ? document.fullscreenElement : null;
+  const home = fs && !/^(VIDEO|IFRAME)$/.test(fs.tagName) ? fs : document.documentElement;
+  if (button.parentNode !== home) home.append(button);
+  if (button.showPopover && !button.matches(':popover-open')) button.showPopover();
+  button.style.visibility = 'visible';
+  if (frame) button.style.visibility = coversFrame(frame) ? 'hidden' : 'visible';
 }
 
 // Modal <dialog>s are drawn in the top layer, above any z-index the site or an ad uses.
@@ -166,6 +202,14 @@ function main() {
   } else if (window.top === window) {
     GM_registerMenuCommand('Open player in Chrome', openInChrome);
     GM_registerMenuCommand('Open player in Chrome (tap a link)', () => { const u = findPlayer(); showPanel(u); return u; });
+    watchHold();
+    for (const t of ['pointerdown', 'pointermove', 'keydown']) {
+      document.addEventListener(t, () => {
+        lastTouch = Date.now();
+        if (pagePlayerUrl(location.href)) updateButton();
+      }, true);
+    }
+    document.addEventListener('fullscreenchange', updateButton);
     setInterval(updateButton, 1000);
   }
 }

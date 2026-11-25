@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const code = fs.readFileSync(new URL('../src/send-to-chrome.user.js', import.meta.url), 'utf8');
-const s = vm.runInNewContext(code + '\n;({isPlayerUrl,pickPlayer,isStreamUrl,pickStream,toChromeIntent,toVlcIntent})', { URL, TypeError });
+const s = vm.runInNewContext(code + '\n;({pagePlayerUrl,isPlayerUrl,pickPlayer,isStreamUrl,pickStream,toChromeIntent,toVlcIntent})', { URL, TypeError });
 const M = 'https://media.settlar.io/v1/object/';
 
 test('isStreamUrl', () => {
@@ -34,4 +34,10 @@ test('intents', () => {
   assert.equal(s.toVlcIntent('http://a.b:8002/x.mp4'), 'intent://a.b:8002/x.mp4#Intent;scheme=http;package=org.videolan.vlc;end');
   assert.equal(s.toChromeIntent('https://a.b/x?q=a%20b;c%23d#frag'), 'intent://a.b/x?q=a%20b;c%23d#Intent;scheme=https;package=com.android.chrome;end');
   for (const u of ['blob:https://a.b/1', 'javascript:alert(1)', 'x']) assert.throws(() => s.toChromeIntent(u));
+});
+
+test('pagePlayerUrl', () => {
+  assert.equal(s.pagePlayerUrl('https://cinejoy.pk/watch/tv/1399/1/1?x=1#t'), 'https://cinejoy.pk/watch/tv/1399/1/1?x=1');
+  for (const u of ['https://cinejoy.pk/movie/423', 'https://cinejoy.pk/watch/', 'https://cinejoy.pk.evil.example/watch/movie/1', 'https://anipm.pk/watch/x'])
+    assert.equal(s.pagePlayerUrl(u), null, u);
 });

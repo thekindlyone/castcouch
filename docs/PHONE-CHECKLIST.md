@@ -13,3 +13,9 @@
 9. Repeat 5–8 with the Beta server.
 
 If 8 fails on the TV but 7 works: Android's own screen cast (Quick Settings → Cast) from Chrome or Firefox needs no site support.
+
+## cinejoy.pk
+
+1. Start a film or episode. The Cast button is top right when paused or just after a touch, and goes away while watching.
+2. Tap it: Firefox pauses, Chrome opens the same title. In Chrome, tap the player and use its own Cast icon.
+3. Does it play on the TV for more than a minute? Any pop-ups in Chrome?
