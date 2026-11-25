@@ -37,6 +37,7 @@ ${q.get('worker')
 </script>`;
 
 const sitePage = (player, q) => `<!doctype html><meta name=viewport content="width=device-width"><title>Harness site</title>
+${q.get('header') ? '<header style="position:fixed;top:0;left:0;right:0;height:56px;background:#333"></header><div style="height:56px"></div>' : ''}
 <a href="/send-to-chrome.user.js">install harness userscript</a>
 <iframe src="http://${player}/embed/v1?t=v1.abc.def&${q}" sandbox="${SANDBOX}" allow="autoplay; fullscreen" style="width:100%;height:240px;border:0"></iframe>
 <nav style="position:fixed;bottom:0;left:0;right:0;height:60px;background:#222;z-index:2147483647"></nav>

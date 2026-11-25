@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Send to Chrome
 // @namespace    https://github.com/thekindlyone/castcouch
-// @version      4.0.0
-// @description  Opens the embedded video player in Chrome for Android, where it can be cast. Uses menu commands only.
+// @version      4.1.0
+// @description  Opens the embedded video player in Chrome for Android, where it can be cast. Adds a Cast button to the page header.
 // @match        *://anipm.pk/*
 // @match        *://*.anipm.pk/*
 // @match        *://ani.pm/*
@@ -65,11 +65,60 @@ function toIntent(url, pkg) {
 const toChromeIntent = url => toIntent(url, 'com.android.chrome');
 const toVlcIntent = url => toIntent(url, 'org.videolan.vlc');
 
-function findPlayer() {
-  return pickPlayer([...document.querySelectorAll('iframe')].map(f => {
-    const r = f.getBoundingClientRect();
-    return { src: f.src, area: r.width * r.height };
-  }));
+function findPlayerFrame() {
+  const frames = [...document.querySelectorAll('iframe')].map(el => {
+    const r = el.getBoundingClientRect();
+    return { el, src: el.src, area: r.width * r.height };
+  });
+  const src = pickPlayer(frames);
+  return src && frames.filter(f => f.src === src).sort((a, b) => b.area - a.area)[0].el;
+}
+const findPlayer = () => findPlayerFrame()?.src ?? null;
+
+// The player is cross-origin, so ask the copy of this script running inside it to pause.
+const PAUSE = 'send-to-chrome:pause';
+function pausePlayer() {
+  findPlayerFrame()?.contentWindow?.postMessage(PAUSE, '*');
+}
+
+function listenForPause() {
+  let holdUntil = 0; // also catches a player that was still loading when the button was tapped
+  window.addEventListener('message', e => {
+    if (e.source !== window.parent || e.data !== PAUSE) return;
+    holdUntil = Date.now() + 5000;
+    document.querySelectorAll('video').forEach(v => v.pause());
+  });
+  document.addEventListener('play', e => { if (Date.now() < holdUntil) e.target.pause?.(); }, true);
+  for (const t of ['pointerdown', 'keydown']) document.addEventListener(t, e => { if (e.isTrusted) holdUntil = 0; }, true);
+}
+
+// A plain link, so the launch comes from a real tap. It is a popover: shown in the top layer (above any
+// z-index) and kept outside <body>, so the site does not re-render it. Sits in the gap after the logo.
+let button = null;
+function updateButton() {
+  const frame = findPlayerFrame();
+  if (!frame) { button?.remove(); return; }
+  if (!button) {
+    button = document.createElement('a');
+    button.textContent = 'Cast';
+    button.title = 'Open player in Chrome';
+    button.setAttribute('popover', 'manual');
+    button.style.cssText = 'position:fixed;inset:auto;top:10px;left:124px;width:57px;height:36px;margin:0;padding:0;border:0;border-radius:18px;background:#1a73e8;color:#fff;font:600 14px/36px sans-serif;text-align:center;text-decoration:none;box-sizing:border-box;overflow:hidden;z-index:2147483647';
+    button.addEventListener('click', pausePlayer);
+  }
+  button.href = toChromeIntent(frame.src);
+  if (!button.isConnected) document.documentElement.append(button);
+  if (button.showPopover && !button.matches(':popover-open')) button.showPopover();
+  // Never sit on the video (landscape, theatre modes).
+  button.style.visibility = 'visible';
+  const b = button.getBoundingClientRect(), f = frame.getBoundingClientRect();
+  const overlaps = b.left < f.right && b.right > f.left && b.top < f.bottom && b.bottom > f.top;
+  // Scrolled under the fixed header is fine: only hide if the video is actually what is drawn there.
+  if (overlaps) {
+    button.style.visibility = 'hidden';
+    const under = document.elementFromPoint((b.left + b.right) / 2, (b.top + b.bottom) / 2);
+    if (under !== frame) button.style.visibility = 'visible';
+  }
 }
 
 // Modal <dialog>s are drawn in the top layer, above any z-index the site or an ad uses.
@@ -85,7 +134,7 @@ function showPanel(url) {
     d.append(e);
   };
   if (url) {
-    row('a', 'Open player in Chrome', { href: toChromeIntent(url) });
+    row('a', 'Open player in Chrome', { href: toChromeIntent(url), onclick: pausePlayer });
     row('button', 'Copy player link', { onclick: () => GM_setClipboard(url) });
   } else {
     d.append('No player found. Start an episode first.');
@@ -99,12 +148,14 @@ function openInChrome() {
   const url = findPlayer();
   if (!url) { showPanel(null); return null; }
   const intent = toChromeIntent(url);
+  pausePlayer();
   location.href = intent;
   return intent;
 }
 
 function main() {
   if (PLAYER_HOSTS.includes(location.host)) {
+    listenForPause();
     // The player iframe is sandboxed without top-navigation/popups, so it cannot launch apps itself.
     GM_registerMenuCommand('[player] Copy stream URL', () => {
       const s = pickStream(performance.getEntriesByType('resource'));
@@ -115,6 +166,7 @@ function main() {
   } else if (window.top === window) {
     GM_registerMenuCommand('Open player in Chrome', openInChrome);
     GM_registerMenuCommand('Open player in Chrome (tap a link)', () => { const u = findPlayer(); showPanel(u); return u; });
+    setInterval(updateButton, 1000);
   }
 }
 

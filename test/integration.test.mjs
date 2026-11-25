@@ -65,6 +65,60 @@ test('link panel is on top of, and tappable through, a full-page max-z-index ove
   await ctx.close();
 });
 
+const BTN = 'a[popover]';
+test('button: appears without the menu, outside the video, above an overlay, and pauses the player when tapped', async () => {
+  const { ctx, page, frame } = await open('overlay=1&header=1');
+  await playing(frame);
+  const btn = page.locator(BTN);
+  await btn.waitFor({ timeout: 4000 });
+  assert.equal(await btn.getAttribute('href'), PLAYER('overlay=1&header=1'));
+  const b = await btn.boundingBox(), f = await page.locator('iframe').boundingBox();
+  assert.ok(b.y + b.height <= f.y, 'button must end above the video');
+  await btn.click({ timeout: 3000 }); // a real click; fails if anything covers it
+  await frame.waitForFunction(() => document.querySelector('video').paused, null, { timeout: 3000 });
+  await page.waitForTimeout(1500);
+  assert.equal(await frame.evaluate(() => document.querySelector('video').paused), true);
+  await ctx.close();
+});
+
+test('button: comes back if removed, follows the episode, goes away with the player', async () => {
+  const { ctx, page } = await open('header=1');
+  await page.locator(BTN).waitFor({ timeout: 4000 });
+  await page.evaluate(s => document.querySelector(s).remove(), BTN);
+  await page.locator(BTN).waitFor({ timeout: 4000 });
+  await page.evaluate(() => { document.querySelector('iframe').src += 'ep=2'; });
+  await page.waitForFunction(s => document.querySelector(s)?.getAttribute('href').includes('ep=2'), BTN, { timeout: 4000 });
+  await page.evaluate(() => document.querySelector('iframe').remove());
+  await page.locator(BTN).waitFor({ state: 'detached', timeout: 4000 });
+  await ctx.close();
+});
+
+test('button: hidden when the video itself is under it', async () => {
+  const { ctx, page } = await open();
+  await page.locator(BTN).waitFor({ state: 'attached', timeout: 4000 });
+  await page.evaluate(() => { document.querySelector('iframe').style.cssText += 'position:fixed;inset:0;height:100%'; });
+  await page.locator(BTN).waitFor({ state: 'hidden', timeout: 4000 });
+  await ctx.close();
+});
+
+test('pause: holds a player that starts late, until the viewer touches it; ignores other senders', async () => {
+  const { ctx, page, frame } = await open('header=1');
+  await playing(frame);
+  await frame.evaluate(() => window.postMessage('send-to-chrome:pause', '*')); // not from the parent
+  await page.waitForTimeout(300);
+  assert.equal(await frame.evaluate(() => document.querySelector('video').paused), false);
+  await page.evaluate(() => document.querySelector('iframe').contentWindow.postMessage('send-to-chrome:pause', '*'));
+  await frame.waitForFunction(() => document.querySelector('video').paused);
+  await frame.evaluate(() => document.querySelector('video').play().catch(() => {}));
+  await page.waitForTimeout(300);
+  assert.equal(await frame.evaluate(() => document.querySelector('video').paused), true);
+  await page.mouse.click(200, 200);
+  await frame.evaluate(() => document.querySelector('video').play().catch(() => {}));
+  await page.waitForTimeout(300);
+  assert.equal(await frame.evaluate(() => document.querySelector('video').paused), false);
+  await ctx.close();
+});
+
 test('no player yet: explains instead of failing', async () => {
   const { ctx, page } = await open();
   await page.evaluate(() => document.querySelector('iframe').remove());

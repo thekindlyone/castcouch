@@ -7,8 +7,8 @@ Userscript for Firefox for Android: opens an embedded video player in Chrome, wh
 
 Tampermonkey then updates it from the same URL whenever `@version` goes up.
 
-**Use**: start an episode → Tampermonkey menu → *Open player in Chrome* → tap the Cast button in Chrome.
-If nothing happens, use *Open player in Chrome (tap a link)*.
+**Use**: start an episode → tap the blue **Cast** button in the page header (right of the logo) → tap the Cast icon in Chrome.
+The player in Firefox is paused when you tap it. If the button is missing, the same action is in the Tampermonkey menu.
 
 - [Findings](docs/FINDINGS.md)
 - [Phone checklist](docs/PHONE-CHECKLIST.md)

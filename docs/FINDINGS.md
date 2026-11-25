@@ -1,6 +1,10 @@
 # Findings (2026-11-25)
 
-Measured with Playwright Firefox 159 and Chromium on desktop Linux. One title, episode 1, dub. Nothing here was run on a phone or against a Chromecast.
+Measured with Playwright Firefox 159 and Chromium on desktop Linux. One title, episode 1, dub. Phone results are in the next section; everything else is desktop.
+
+## Confirmed by the user on the phone (v4.0.0)
+
+Installing from the GitHub URL, opening Chrome from Firefox for Android, and casting to the Chromecast all work.
 
 ## Decision: direct handoff of the player page. No home helper.
 
@@ -55,6 +59,13 @@ Limits: one title, short sessions, a desktop user agent. Ads can vary by device,
 - v2: **cause not found.** Its source was not in the handoff. A badge rebuilt from the description, injected without Tampermonkey, was visible in both frames, was never removed over ~30 s, and raised no error. That argues against the site removing it, and points at the script or Tampermonkey.
 - Seen with ads unblocked: a full-page ad layer (`#dontfoid`) covered the badge in hit tests and swallowed clicks. v4's fallback uses a modal `<dialog>` (top layer), which stays above it.
 
+## v4.1.0 button and pause
+
+- The button is a popover (top layer) outside `<body>`, at x=124-181, y=10-46, in the gap between the logo and the header icons. The header is fixed and 56 px tall; the video starts below it. Checked on the real page at 360 and 412 px wide and in landscape.
+- It is re-created if removed, and hidden if the video itself is drawn under it.
+- Tapping it posts a message to the copy of the script inside the player frame, which pauses the video. On the real site (default and Backup) it stayed paused for the 7 s observed.
+- With ads unblocked, the tap also opened an ad tab, as any click on that page does. An ad blocker is still needed in Firefox.
+
 ## Not tested
 
-Real Tampermonkey (desktop or Android), Firefox Android → Chrome `intent://`, Chrome for Android, and an actual Chromecast.
+The v4.1.0 button and pause in real Tampermonkey on the phone, where the v2 badge failed for an unknown reason. The button and pause on the Beta server's own player (`beta.cno.to`).
