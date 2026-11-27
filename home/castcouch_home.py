@@ -10,8 +10,10 @@ Standard library only; Python 3.9+. Run: python castcouch_home.py [--port 8899] 
 Always-on mode (restarts the service if it exits or stops answering): python castcouch_home.py --supervise
 """
 import argparse
+import collections
 import html
 import ipaddress
+import hashlib
 import json
 import logging
 import logging.handlers
@@ -31,7 +33,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = '1.2.0'
+VERSION = '1.4.1'
 UA = 'castcouch-relay/' + VERSION  # an honest name of our own; some CDNs refuse Python's default one
 RECEIVER = 'CC1AD845'  # Google's Default Media Receiver
 NS = 'urn:x-cast:com.google.cast.'
@@ -352,11 +354,12 @@ class Cast:
             self.transport = tid
             self.send(tid, 'tp.connection', {'type': 'CONNECT'})
 
-    def load(self, url, title, position, subtitles=None):
+    def load(self, url, title, position, subtitles=None, content_type='application/x-mpegurl'):
         """subtitles: (vtt url, name) or None. Shown from the start when given."""
-        media = {'contentId': url, 'contentType': 'application/x-mpegurl', 'streamType': 'BUFFERED',
-                 'hlsSegmentFormat': 'ts', 'hlsVideoSegmentFormat': 'mpeg2_ts',
+        media = {'contentId': url, 'contentType': content_type, 'streamType': 'BUFFERED',
                  'metadata': {'metadataType': 0, 'title': title or 'castcouch'}}
+        if content_type == 'application/x-mpegurl':
+            media.update(hlsSegmentFormat='ts', hlsVideoSegmentFormat='mpeg2_ts')
         payload = {'type': 'LOAD', 'autoplay': True, 'currentTime': max(0.0, float(position or 0)), 'media': media}
         if subtitles:
             media['tracks'] = [{'trackId': 1, 'type': 'TEXT', 'subtype': 'SUBTITLES', 'trackContentId': subtitles[0],
@@ -437,13 +440,18 @@ def discover(timeout=3.0):
 # ---------------------------------------------------------------- service
 
 class Home:
-    def __init__(self, port, tv=None, tv_name=None, state=None):
+    def __init__(self, port, tv=None, tv_name=None, state=None, library=None, opensubtitles=None):
         self.port, self.tv_fixed, self.tv_name = port, tv, tv_name
+        self.library, self.opensubtitles = library or Library([]), opensubtitles
         self.tv = None  # (host, port, name)
         self.cast = None
         self.session = None  # {'id', 'playlist', 'segs', 'title', 'page', 'vtt', ...}
         self.base = None
         self.lock = threading.Lock()
+        self.cache = collections.OrderedDict()  # (session id, n) -> bytes: pieces fetched ahead
+        self.inflight = {}  # (session id, n) -> Event while a piece downloads
+        self.cache_lock = threading.Lock()
+        self.timing = []  # (n, seconds from the internet, seconds to the TV or None) since the last summary
         # What is playing is kept on disk, so a restarted service (update, crash) keeps feeding the TV.
         self.state = state
         self.load_state()
@@ -545,11 +553,44 @@ class Home:
                             'page': str(body.get('page') or '')[:500], 'vtt': vtt, 'vtt_n': 0,
                             'vtt_name': str((sub or {}).get('label') or '')[:200] if vtt else None}
             self.base = 'http://%s:%d/s/%s/' % (self.lan_address(cast.host), self.port, sid)
+            self.session.update(media_url=self.base + 'p.m3u8', ctype='application/x-mpegurl')
             cast.launch()
-            media = cast.load(self.base + 'p.m3u8', self.session['title'], body.get('position') or 0, self.sub_track())
+            media = cast.load(self.session['media_url'], self.session['title'], body.get('position') or 0, self.sub_track())
             self.save_state()
             log.info('playing %r (%d segments%s) on %s', self.session['title'], len(segs), ', subtitles' if vtt else '', self.tv[2])
             return dict(self.describe(media), title=self.session['title'])
+
+    def play_local(self, body):
+        """A film from the library, read by the TV straight from this PC. English subtitles: a file beside it,
+        else OpenSubtitles (if a key is set up). body: {id, position, subtitles: true/false}."""
+        with self.lock:
+            item = self.library.get(str(body.get('id') or ''))
+            vtt, name, source = None, None, None
+            if body.get('subtitles', True):
+                found = local_subtitles(item['path'], item['own_folder'])
+                if found:
+                    try:
+                        vtt, name, source = to_vtt(read_text(found)), os.path.basename(found), 'beside the film'
+                    except Failure:
+                        log.info('unusable subtitle file %s', found)
+                if not vtt and self.opensubtitles:
+                    got = self.opensubtitles.english(item)
+                    if got:
+                        try:
+                            vtt, name, source = to_vtt(got[0]), got[1], 'OpenSubtitles'
+                        except Failure:
+                            pass
+            cast = self.connection()
+            sid = secrets.token_hex(6)
+            self.base = 'http://%s:%d/s/%s/' % (self.lan_address(cast.host), self.port, sid)
+            self.session = {'id': sid, 'kind': 'local', 'path': item['path'], 'title': item['title'], 'page': 'local:' + item['id'],
+                            'vtt': vtt, 'vtt_n': 0, 'vtt_name': name, 'segs': [], 'playlist': '',
+                            'media_url': self.base + 'video' + item['ext'], 'ctype': VIDEO_TYPES[item['ext']]}
+            cast.launch()
+            media = cast.load(self.session['media_url'], item['title'], body.get('position') or 0, self.sub_track(), self.session['ctype'])
+            self.save_state()
+            log.info('playing local %r%s on %s', item['path'], ', subtitles ' + source if vtt else '', self.tv[2])
+            return dict(self.describe(media), title=item['title'], subtitles_from=source)
 
     def sub_track(self):
         s = self.session
@@ -567,7 +608,7 @@ class Home:
             s['vtt_name'] = str((sub or {}).get('label') or '')[:200] if s['vtt'] else None
             s['vtt_n'] += 1
             position = self.cast.refresh() and self.cast.media.get('currentTime') or 0
-            media = self.cast.load(self.base + 'p.m3u8', s['title'], position, self.sub_track())
+            media = self.cast.load(s['media_url'], s['title'], position, self.sub_track(), s['ctype'])
             self.save_state()
             log.info('subtitles %s for %r at %ds', 'replaced' if s['vtt'] else 'removed', s['title'], position)
             return self.describe(media)
@@ -598,30 +639,317 @@ class Home:
                 'position': round(float((media or {}).get('currentTime') or 0)),
                 'title': s.get('title') if on else None, 'page': s.get('page') if on else None,
                 'subtitles': (s.get('vtt_name') or 'on') if on and s.get('vtt') and (active is None or 1 in active) else None,
-                'has_subtitles': bool(on and s.get('vtt')), 'tv': self.tv[2] if self.tv else None}
+                'has_subtitles': bool(on and s.get('vtt')), 'local': s.get('kind') == 'local' if on else None,
+                'tv': self.tv[2] if self.tv else None}
+
+    AHEAD = 3  # pieces fetched in advance of the one the TV asks for (about 25 s of Polaris video)
 
     def segment(self, sid, n):
+        """Piece n of the playing film, from the read-ahead cache when possible; starts fetching the next ones."""
         s = self.session
         if not s or s['id'] != sid or not 0 <= n < len(s['segs']):
             raise Failure('gone', 'Unknown segment.', 404)
-        b = fetch(s['segs'][n], timeout=30)
-        off = ts_offset(b)
-        return b[off:] if off else b
+        for k in range(n + 1, min(n + 1 + self.AHEAD, len(s['segs']))):
+            threading.Thread(target=self._ahead, args=(sid, k, s['segs'][k]), daemon=True).start()
+        return self._piece(sid, n, s['segs'][n])
+
+    def _ahead(self, sid, n, url):
+        try:
+            self._piece(sid, n, url)
+        except Failure:
+            pass  # fetched again when the TV asks for it
+
+    def _piece(self, sid, n, url):
+        key = (sid, n)
+        with self.cache_lock:
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                return self.cache[key]
+            ev = self.inflight.get(key)
+            mine = ev is None
+            if mine:
+                ev = self.inflight[key] = threading.Event()
+        if not mine:  # someone is already fetching it
+            ev.wait(60)
+            with self.cache_lock:
+                if key in self.cache:
+                    return self.cache[key]
+            raise Failure('stream-unreachable', 'A piece of the video could not be fetched.')
+        try:
+            t = time.time()
+            b = fetch(url, timeout=30)
+            took = time.time() - t
+            if took > 4:
+                log.warning('slow internet: piece %d took %.1f s (%.1f MB)', n, took, len(b) / 1e6)
+            off = ts_offset(b)
+            b = b[off:] if off else b
+            with self.cache_lock:
+                self.cache[key] = b
+                while len(self.cache) > 2 * self.AHEAD + 2:
+                    self.cache.popitem(last=False)
+                self.timing.append([n, took, None])
+            return b
+        finally:
+            with self.cache_lock:
+                self.inflight.pop(key, None)
+            ev.set()
+
+    def delivered(self, n, seconds, size):
+        """Record how long sending piece n to the TV took; log a summary every 20 pieces."""
+        if seconds > 4:
+            log.warning('slow Wi-Fi to the TV: piece %d took %.1f s to send (%.1f MB)', n, seconds, size / 1e6)
+        with self.cache_lock:
+            for t in self.timing:
+                if t[0] == n and t[2] is None:
+                    t[2] = seconds
+                    break
+            done = [t for t in self.timing if t[2] is not None]
+            if len(done) < 20:
+                return
+            self.timing = [t for t in self.timing if t[2] is None]
+        net, tv = [t[1] for t in done], [t[2] for t in done]
+        log.info('pieces %d-%d: internet avg %.1f s (max %.1f), to the TV avg %.1f s (max %.1f)',
+                 min(t[0] for t in done), max(t[0] for t in done), sum(net) / len(net), max(net), sum(tv) / len(tv), max(tv))
+
+
+# ---------------------------------------------------------------- local library
+
+VIDEO_TYPES = {'.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mkv': 'video/x-matroska', '.webm': 'video/webm',
+               '.mov': 'video/quicktime', '.avi': 'video/x-msvideo', '.ts': 'video/mp2t'}
+MAYBE = {'.avi', '.mov', '.ts'}  # often old codecs the TV's player cannot decode
+
+
+QUALITY = r'\b(?:480p|576p|720p|1080p|2160p|4k|uhd|imax|bluray|blu-ray|brrip|bdrip|web-?dl|webrip|web|amzn|dvdrip|hdrip|hdtv|x264|x265|h ?264|h ?265|hevc|aac|ddp?5 1|yify)\b'
+
+
+def nice_title(name):
+    """'Knives.Out.2019.1080p.WEBRip.x264-RARBG' -> 'Knives Out (2019)'. With two years ('Wonder.Woman.1984.2020'),
+    the last one before the release details is the year; the earlier one belongs to the title."""
+    name = re.sub(r'\.(mp4|m4v|mkv|webm|mov|avi|ts)$', '', name, flags=re.I)
+    name = re.sub(r'[._]+', ' ', name)
+    name = re.sub(r'^\s*(\[[^\]]*\]\s*)+', '', name) or name  # leading release-group tags: [AnimeRG] Boruto
+    q = re.search(QUALITY, name, re.I)
+    head = name[:q.start()] if q else name
+    years = [m for m in re.finditer(r'[\[(]?\b(19[2-9]\d|20[0-4]\d)\b[\])]?', head) if m.start() > 0]
+    if years:
+        m = years[-1]
+        return '%s (%s)' % (re.sub(r'[\s\[(-]+$', '', name[:m.start()]).strip(), m.group(1))
+    return re.sub(r'[\s\[(-]+$', '', head).strip() or name
+
+
+def quality(f):
+    m = re.search(r'(?<![a-z0-9])(480p|576p|720p|1080p|2160p|4k)(?![a-z0-9])', f, re.I)
+    return m.group(1).lower() if m else None
+
+
+def generic_name(f):
+    """'part2.mp4', 'CD1.avi', 'movie.mkv': a file name that says nothing about the film."""
+    return re.fullmatch(r'(part|cd|disc|disk|pt)[ ._-]?\d+|movie|video|film|\d+', os.path.splitext(f)[0].strip(), re.I) is not None
+
+
+class Library:
+    """Films under the given folders. Ids are stable (from the path) so the phone never sends a path."""
+
+    def __init__(self, roots, min_size=50 * 2**20):
+        self.roots, self.min_size = [r for r in roots if r], min_size
+        self.items, self.scanned, self.lock = {}, 0, threading.Lock()
+
+    def scan(self, force=False):
+        with self.lock:
+            if not force and time.time() - self.scanned < 600:
+                return self.items
+            items = {}
+            for root in self.roots:
+                for d, dirs, files in os.walk(root, onerror=lambda e: None):
+                    dirs[:] = [x for x in dirs if 'sample' not in x.lower()]
+                    videos = [f for f in files if os.path.splitext(f)[1].lower() in VIDEO_TYPES and 'sample' not in f.lower()]
+                    for f in videos:
+                        path = os.path.join(d, f)
+                        try:
+                            size = os.path.getsize(path)
+                        except OSError:
+                            continue
+                        if size < self.min_size:
+                            continue
+                        folder = os.path.basename(d) if os.path.normcase(d) != os.path.normcase(root) else ''
+                        one = folder and len(videos) == 1
+                        title = nice_title(folder if one or (folder and generic_name(f)) else f)
+                        part = re.search(r'(?:part|cd|disc|disk|pt)[ ._-]?(\d+)', f, re.I) if generic_name(f) else None
+                        if part and not one:
+                            title += ' – part %s' % part.group(1)
+                        iid = hashlib.sha1(os.path.normcase(path).encode('utf-8', 'replace')).hexdigest()[:12]
+                        items[iid] = {'id': iid, 'title': title, 'file': f, 'path': path, 'size': size, 'root': root,
+                                      'ext': os.path.splitext(f)[1].lower(), 'own_folder': bool(folder) and len(videos) <= 2}
+            self.items, self.scanned = items, time.time()
+            log.info('library: %d films in %s', len(items), self.roots)
+            return items
+
+    def get(self, iid):
+        item = self.scan().get(iid) or self.scan(force=True).get(iid)
+        if not item:
+            raise Failure('not-found', 'That film is not in the library any more.', 404)
+        return item
+
+    def listing(self, force=False):
+        out = [{'id': i['id'], 'title': i['title'], 'file': i['file'], 'size': i['size'], 'drive': i['root'][:2],
+                'quality': quality(i['file']),
+                'maybe': i['ext'] in MAYBE, 'subs': bool(local_subtitles(i['path'], i['own_folder']))}
+               for i in self.scan(force).values()]
+        return sorted(out, key=lambda x: x['title'].lower())
+
+
+def local_subtitles(video, own_folder=True):
+    """The best English-looking .srt/.vtt beside a film: in its folder, or in Subs/Subtitles folders under it.
+    A film lying loose in a big folder (own_folder=False) only gets files named after it."""
+    d, stem = os.path.dirname(video), os.path.splitext(os.path.basename(video))[0].lower()
+    subdirs = []
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return None
+    found = [os.path.join(d, f) for f in names if os.path.splitext(f)[1].lower() in ('.srt', '.vtt')]
+    if own_folder:
+        for x in names:
+            if re.fullmatch(r'subs?|subtitles?', x, re.I) and os.path.isdir(os.path.join(d, x)):
+                for base, dirs, files in os.walk(os.path.join(d, x)):
+                    found += [os.path.join(base, f) for f in files if os.path.splitext(f)[1].lower() in ('.srt', '.vtt')]
+    else:
+        found = [f for f in found if os.path.basename(f).lower().startswith(stem)]
+
+    def score(path):
+        n = re.sub(r'[._\-\[\]()]+', ' ', os.path.relpath(path, d).lower())
+        other = re.search(r'\b(fre|french|spa|spanish|ger|german|ita|italian|por|portuguese|rus|russian|chi|chinese|'
+                          r'ara|arabic|hin|hindi|kor|korean|jpn|japanese|dut|dutch|swe|swedish|tur|turkish|pol|polish|heb|hebrew|gre|greek)\b', n)
+        sc = (5 if re.search(r'\b(en|eng|english)\b', n) else 0) - (5 if other else 0)
+        sc += 3 if os.path.basename(path).lower().startswith(stem) else 0
+        sc -= 4 if 'forced' in n else 0
+        try:
+            sc += min(os.path.getsize(path), 200000) / 200000.0  # a fuller file beats a stub
+        except OSError:
+            pass
+        return sc
+    found = [f for f in found if score(f) > -1]
+    return max(found, key=score) if found else None
+
+
+def read_text(path):
+    raw = open(path, 'rb').read(5_000_000)
+    for enc in ('utf-8-sig', 'cp1252', 'latin-1'):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode('utf-8', 'replace')
+
+
+# ---------------------------------------------------------------- OpenSubtitles (official API, your own key)
+
+def opensubtitles_hash(path):
+    """OpenSubtitles' file fingerprint: size + the 64-bit little-endian sums of the first and last 64 KiB."""
+    size = os.path.getsize(path)
+    if size < 131072:
+        return None
+    h = size
+    with open(path, 'rb') as f:
+        for pos in (0, size - 65536):
+            f.seek(pos)
+            for (word,) in struct.iter_unpack('<Q', f.read(65536)):
+                h = (h + word) & 0xFFFFFFFFFFFFFFFF
+    return '%016x' % h
+
+
+class OpenSubtitles:
+    """English subtitles from api.opensubtitles.com with the key in config.json. Downloads are cached."""
+
+    def __init__(self, key, cache_dir, base='https://api.opensubtitles.com/api/v1'):
+        self.key, self.cache_dir, self.base = key, cache_dir, base
+
+    def _call(self, path, data=None):
+        req = urllib.request.Request(self.base + path, data=json.dumps(data).encode() if data is not None else None,
+                                     headers={'Api-Key': self.key, 'User-Agent': 'castcouch v' + VERSION,
+                                              'Content-Type': 'application/json', 'Accept': 'application/json'})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())
+
+    def english(self, item):
+        """(text, name) or None. Prefers a fingerprint match (made for this exact file), then the title."""
+        cached = os.path.join(self.cache_dir, item['id'] + '.srt')
+        if os.path.exists(cached):
+            return read_text(cached), open(cached + '.name', encoding='utf-8').read() if os.path.exists(cached + '.name') else 'OpenSubtitles'
+        try:
+            fp = opensubtitles_hash(item['path'])
+            m = re.match(r'(.*) \((\d{4})\)$', item['title'])
+            q = {'languages': 'en', 'moviehash': fp} if fp else {}
+            found = self._call('/subtitles?' + urllib.parse.urlencode(q)).get('data', []) if fp else []
+            if not found:
+                q = {'languages': 'en', 'query': m.group(1) if m else item['title']}
+                if m:
+                    q['year'] = m.group(2)
+                found = self._call('/subtitles?' + urllib.parse.urlencode(q)).get('data', [])
+            def rank(x):
+                a = x.get('attributes', {})
+                return (bool(a.get('moviehash_match')), not a.get('foreign_parts_only'), not a.get('hearing_impaired'),
+                        bool(a.get('from_trusted')), a.get('download_count') or 0)
+            found = [x for x in found if x.get('attributes', {}).get('files')]
+            if not found:
+                log.info('OpenSubtitles: nothing in English for %r', item['title'])
+                return None
+            best = max(found, key=rank)['attributes']
+            link = self._call('/download', {'file_id': best['files'][0]['file_id']})
+            with urllib.request.urlopen(urllib.request.Request(link['link'], headers={'User-Agent': 'castcouch v' + VERSION}), timeout=20) as r:
+                raw = r.read()
+            name = best.get('release') or best['files'][0].get('file_name') or 'OpenSubtitles'
+            os.makedirs(self.cache_dir, exist_ok=True)
+            with open(cached, 'wb') as f:
+                f.write(raw)
+            with open(cached + '.name', 'w', encoding='utf-8') as f:
+                f.write(name)
+            log.info('OpenSubtitles: %r for %r (%s downloads left today)', name, item['title'], link.get('remaining'))
+            return read_text(cached), name
+        except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
+            log.warning('OpenSubtitles failed for %r: %s', item['title'], e)
+            return None
 
 
 REMOTE = '''<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>castcouch remote</title>
-<style>body{font:18px sans-serif;margin:0;padding:16px;background:#111;color:#eee}button{display:block;width:100%;margin:10px 0;
-padding:18px;font:18px sans-serif;border:0;border-radius:10px;background:#1a73e8;color:#fff}.row{display:flex;gap:10px}
-.row button{flex:1}#s{min-height:3em}</style><h2>castcouch remote</h2><div id=s>…</div>
+<style>body{font:17px sans-serif;margin:0;padding:12px;background:#111;color:#eee}button{margin:4px 0;padding:14px;font:16px sans-serif;
+border:0;border-radius:10px;background:#1a73e8;color:#fff}.row{display:flex;gap:8px}.row button{flex:1}#now{background:#1d1d1d;
+border-radius:12px;padding:12px;margin-bottom:12px}#s{min-height:2.4em}input[type=search]{width:100%;box-sizing:border-box;padding:12px;
+font:17px sans-serif;border-radius:10px;border:0;margin:6px 0}.film{padding:12px 6px;border-bottom:1px solid #2a2a2a}.film b{display:block}
+.film small{color:#999}.tag{display:inline-block;font-size:12px;padding:1px 6px;border-radius:6px;margin-left:6px;background:#333}
+.warn{background:#7a4a00}#msg{color:#f6ae2d;min-height:1.2em}label{display:block;margin:6px 0}</style>
+<h2 style="margin:4px 0 10px">castcouch remote</h2>
+<div id=now><div id=s>…</div>
 <div class=row><button onclick="c('pause')">Pause</button><button onclick="c('play')">Play</button></div>
 <div class=row><button onclick="c('seek',-30)">−30 s</button><button onclick="c('seek',30)">+30 s</button></div>
 <div class=row><button onclick="c('subtitles-on')">Subtitles on</button><button onclick="c('subtitles-off')">Subtitles off</button></div>
-<button onclick="c('stop')" style="background:#c5221f">Stop</button><script>
+<button onclick="c('stop')" style="background:#c5221f;width:100%">Stop</button></div>
+<div id=lib><b>Your films</b> <small id=count></small>
+<input type=search id=q placeholder="Search" oninput="draw()">
+<label><input type=checkbox id=subs checked> English subtitles (beside the film<span id=os></span>)</label>
+<div id=msg></div><div id=list></div><button onclick="load(1)" style="background:#333;width:100%">Look for new films</button></div>
+<script>
 const t=s=>{const h=Math.floor(s/3600),m=Math.floor(s/60)%60;return(h?h+':':'')+String(m).padStart(h?2:1,'0')+':'+String(s%60).padStart(2,'0')};
-const show=r=>{document.getElementById('s').textContent=r.ok===false?r.message:(r.playing?(r.title||'Video')+' — '+r.state.toLowerCase()+' at '+t(r.position)+' on '+r.tv+(r.has_subtitles?(r.subtitles?' (subtitles on)':' (subtitles off)'):''):'Nothing playing from castcouch.')};
+const $=id=>document.getElementById(id);
+const show=r=>{$('s').textContent=r.ok===false?r.message:(r.playing?(r.title||'Video')+' — '+r.state.toLowerCase()+' at '+t(r.position)+' on '+r.tv+(r.has_subtitles?(r.subtitles?' (subtitles on)':' (subtitles off)'):''):'Nothing playing from castcouch.')};
 async function c(action,seconds){show(await (await fetch('/control',{method:'POST',body:JSON.stringify({action,seconds})})).json())}
-async function poll(){try{show(await (await fetch('/status')).json())}catch(e){document.getElementById('s').textContent='Service not answering.'}}
-poll();setInterval(poll,3000)</script>'''
+async function poll(){try{show(await (await fetch('/status')).json())}catch(e){$('s').textContent='Service not answering.'}}
+let films=[];
+async function load(refresh){$('msg').textContent=refresh?'Looking…':'';try{const r=await (await fetch('/library'+(refresh?'?refresh=1':''))).json();
+ films=r.items||[];$('count').textContent=films.length?'('+films.length+')':'';$('os').textContent=r.opensubtitles?', else OpenSubtitles':'';
+ if(!r.folders||!r.folders.length)$('msg').textContent='No film folders set up on the PC.';else $('msg').textContent='';draw()}catch(e){$('msg').textContent='Could not load the library.'}}
+function draw(){const q=$('q').value.toLowerCase().trim(),L=$('list');L.textContent='';
+ for(const f of films.filter(f=>!q||(f.title+' '+f.file).toLowerCase().includes(q)).slice(0,2000)){
+  const d=document.createElement('div');d.className='film';const b=document.createElement('b');b.textContent=f.title;d.append(b);
+  const sm=document.createElement('small');sm.textContent=[f.drive,f.quality,(f.size/2**30).toFixed(1)+' GB'].filter(Boolean).join(' · ');d.append(sm);
+  if(f.subs){const x=document.createElement('span');x.className='tag';x.textContent='subtitles';d.append(x)}
+  if(f.maybe){const x=document.createElement('span');x.className='tag warn';x.textContent='may not play';d.append(x)}
+  d.onclick=()=>play(f);L.append(d)}}
+async function play(f){$('msg').textContent='Starting '+f.title+' on the TV…';window.scrollTo(0,0);
+ try{const r=await (await fetch('/play-local',{method:'POST',body:JSON.stringify({id:f.id,subtitles:$('subs').checked})})).json();
+  $('msg').textContent=r.ok?'':r.message;if(r.ok){show(r);if($('subs').checked&&!r.has_subtitles)$('msg').textContent='Playing, but no English subtitles were found.'}}
+ catch(e){$('msg').textContent='The service did not answer.'}}
+poll();setInterval(poll,3000);load(0)</script>'''
 
 
 def allowed(addr):
@@ -703,24 +1031,74 @@ def make_handler(home):
                                         'tv': home.tv[2] if home.tv else None})
             if path == '/status':
                 return self.reply(200, home.status())
-            m = re.fullmatch(r'/s/([0-9a-f]+)/(p\.m3u8|(\d+)\.ts|sub\d+\.vtt)', path)
+            if path == '/library':
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                return self.reply(200, {'ok': True, 'items': home.library.listing(force='refresh' in q),
+                                        'folders': home.library.roots, 'opensubtitles': bool(home.opensubtitles)})
+            m = re.fullmatch(r'/s/([0-9a-f]+)/(p\.m3u8|(\d+)\.ts|sub\d+\.vtt|video\.\w+)', path)
             if not m:
                 return self.reply(404, {'ok': False, 'code': 'not-found', 'message': 'Not found.'})
             s = home.session
             if not s or s['id'] != m.group(1):
                 return self.reply(404, {'ok': False, 'code': 'gone', 'message': 'That video is no longer being relayed.'})
+            if m.group(2).startswith('video'):
+                if s.get('kind') != 'local':
+                    return self.reply(404, {'ok': False, 'code': 'not-found', 'message': 'Not found.'})
+                return self.send_file(s['path'], s['ctype'])
             if m.group(2).startswith('sub'):
                 if not s.get('vtt'):
                     return self.reply(404, {'ok': False, 'code': 'gone', 'message': 'No subtitles.'})
                 return self.reply(200, s['vtt'], 'text/vtt; charset=utf-8')
             if m.group(2) == 'p.m3u8':
                 return self.reply(200, s['playlist'], 'application/vnd.apple.mpegurl')
-            self.reply(200, home.segment(m.group(1), int(m.group(3))), 'video/mp2t')
+            body, t = home.segment(m.group(1), int(m.group(3))), time.time()
+            self.reply(200, body, 'video/mp2t')
+            home.delivered(int(m.group(3)), time.time() - t, len(body))
+
+        def send_file(self, path, ctype):
+            """The file, or the byte range the player asks for (players read a film in ranges and seek with them)."""
+            size = os.path.getsize(path)
+            start, end, status = 0, size - 1, 200
+            m = re.fullmatch(r'bytes=(\d*)-(\d*)', self.headers.get('Range', '').strip())
+            if m and (m.group(1) or m.group(2)):
+                if m.group(1):
+                    start = int(m.group(1))
+                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                else:  # the last N bytes
+                    start = max(0, size - int(m.group(2)))
+                if start >= size or start > end:
+                    self.send_response(416)
+                    self.send_header('Content-Range', 'bytes */%d' % size)
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+                status = 206
+            self.send_response(status)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Accept-Ranges', 'bytes')
+            self.send_header('Content-Length', str(end - start + 1))
+            if status == 206:
+                self.send_header('Content-Range', 'bytes %d-%d/%d' % (start, end, size))
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            if self.command == 'HEAD':
+                return
+            with open(path, 'rb') as f:
+                f.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    chunk = f.read(min(1 << 20, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
 
         def post(self):
             path = urllib.parse.urlparse(self.path).path
             if path == '/play':
                 return self.reply(200, home.play(self.body()))
+            if path == '/play-local':
+                return self.reply(200, home.play_local(self.body()))
             if path == '/subtitles':
                 return self.reply(200, home.subtitles(self.body()))
             if path == '/control':
@@ -730,7 +1108,18 @@ def make_handler(home):
 
 
 def serve(args):
-    home = Home(args.port, args.tv, args.tv_name, args.state or os.path.join(os.path.dirname(args.log), 'session.json'))
+    here = os.path.dirname(args.log)
+    config = {}
+    try:
+        with open(args.config or os.path.join(here, 'config.json'), encoding='utf-8-sig') as f:
+            config = json.load(f)
+    except (OSError, ValueError) as e:
+        log.info('no config.json (%s); defaults used', e)
+    key = config.get('opensubtitles_api_key')
+    home = Home(args.port, args.tv, args.tv_name, args.state or os.path.join(here, 'session.json'),
+                Library(args.library or config.get('library') or []),
+                OpenSubtitles(key, os.path.join(here, 'subtitles')) if key else None)
+    threading.Thread(target=home.library.scan, daemon=True).start()
     try:
         httpd = ThreadingHTTPServer((args.bind, args.port), make_handler(home))
     except OSError as e:
@@ -793,6 +1182,10 @@ def supervise(args):
         # python.exe is the program the firewall allows; started without a console window.
         exe = os.path.join(os.path.dirname(exe), 'python.exe')
     cmd = [exe, os.path.abspath(__file__), '--port', str(args.port), '--bind', args.bind, '--log', args.log]
+    for folder in args.library or []:
+        cmd += ['--library', folder]
+    if args.config:
+        cmd += ['--config', args.config]
     if args.tv:
         cmd += ['--tv', args.tv]
     if args.tv_name:
@@ -852,6 +1245,8 @@ def main(argv=None):
     p.add_argument('--tv-name', help='use the Cast device with this name')
     p.add_argument('--log', default=default_log())
     p.add_argument('--state', help='where to keep what is playing (default: session.json beside the log)')
+    p.add_argument('--library', action='append', help='a folder of films (repeatable); default: "library" in config.json')
+    p.add_argument('--config', help='settings file (default: config.json beside the log)')
     p.add_argument('--supervise', action='store_true', help='keep the service running')
     p.add_argument('--check', type=float, default=30, help=argparse.SUPPRESS)
     args = p.parse_args(argv)

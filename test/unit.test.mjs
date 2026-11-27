@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const code = fs.readFileSync(new URL('../src/send-to-chrome.user.js', import.meta.url), 'utf8');
-const s = vm.runInNewContext(code + '\n;({pagePlayerUrl,isPlayerUrl,pickPlayer,isStreamUrl,pickStream,currentStream,recentStreams,subtitleName,isSubtitleUrl,toChromeIntent,toVlcIntent})', { URL, TypeError, atob });
+const s = vm.runInNewContext(code + '\n;({pagePlayerUrl,isPlayerUrl,pickPlayer,isStreamUrl,pickStream,currentStream,recentStreams,subtitleName,isSubtitleUrl,bestEnglish,toChromeIntent,toVlcIntent})', { URL, TypeError, atob });
 const M = 'https://media.settlar.io/v1/object/';
 
 test('isStreamUrl', () => {
@@ -75,4 +75,17 @@ test('subtitles: which addresses count, and their readable names', () => {
   assert.equal(s.subtitleName(url), 'Shang-Chi.And.The.Legend.Of.The.Ten.Rings.2021.1080p.BluRay.x264-VETO.srt');
   assert.equal(s.subtitleName('http://a/subs/My%20film.srt'), 'My film.srt');
   assert.equal(s.subtitleName('https://subs2.wing.st/sub/@@@'), 'Subtitles');
+});
+
+test('bestEnglish: most up-voted English file; list order breaks ties; none without English', () => {
+  const list = { subtitles: [
+    { url: 'https://s/sub/fr', language: 'fr', display: 'fr.srt', voteRef: 'f' },
+    { url: 'https://s/sub/a', language: 'en', display: 'A.srt', voteRef: 'a' },
+    { url: 'https://s/sub/b', language: 'en', display: 'B.srt', voteRef: 'b' },
+    { url: 'https://s/sub/c', language: 'en', display: 'C.srt', voteRef: 'c' },
+  ] };
+  assert.equal(s.bestEnglish(list, { votes: { a: { up: 1, down: 0 }, b: { up: 5, down: 1 }, f: { up: 99 } } }).label, 'B.srt');
+  assert.equal(s.bestEnglish(list, null).url, 'https://s/sub/a');
+  assert.equal(s.bestEnglish({ subtitles: [list.subtitles[0]] }, null), null);
+  assert.equal(s.bestEnglish(null, null), null);
 });

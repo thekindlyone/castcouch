@@ -171,3 +171,20 @@ The receiver (Google default, `CC1AD845`) runs on another origin, so each server
   subtitle state intact, no reload. `install.ps1` now refuses to replace the service while something plays (`-Force`
   overrides).
 - Subtitles confirmed on the real TV: the service reported The Batman playing with an English SRT on.
+
+## Local films, automatic English subtitles, read-ahead (script 4.6.0, service 1.4.x, 2026-11-28)
+
+- Buffering during The Batman: not diagnosable afterwards; the service did not log timings. 1.3.0 fetches the next 3
+  pieces ahead (~25 s of Polaris video) and logs, every 20 pieces, how long they took from the internet and to the TV
+  (and warns about any piece over 4 s), so the next stall can be pinned on the internet or the Wi-Fi. Note the PC is
+  on Wi-Fi too, so every piece crosses the Wi-Fi twice (internet → PC, PC → TV).
+- cinejoy subtitles: the page loads `subs2.wing.st/subtitles?…` (every file, with `language`, `display`, `voteRef`)
+  and `subs2.wing.st/votes/…` (`{votes: {ref: {up, down}}}`). With nothing picked, 4.6.0 refetches those exact
+  addresses and sends the English file with the best up−down balance (list order breaks ties).
+- Library: D:\Movies and E:\Movies hold 309 films (scan 1.1 s on Windows): 144 + 165; 112 with English subtitles
+  beside them; 27 AVI/MOV/TS. Sample of 60 files (ffprobe headers): ~47 H.264+AAC, ~9 with AC3/DTS sound, 2 HEVC MKV,
+  3 AVI (MPEG-4 Part 2). ffmpeg is not installed on Windows, so nothing is converted.
+- The TV gets the file itself (`video/mp4`, `video/x-matroska`, …) with byte ranges; tested against the fake TV only.
+  Whether the real TV plays MKV, HEVC and AC3 through Google's default receiver is not yet known.
+- OpenSubtitles: official REST API with the user's own key (`Api-Key`, `User-Agent: castcouch v…`), search by
+  `moviehash` then `query`+`year`, `POST /download` → link. Tested against a fake server only; no key available here.

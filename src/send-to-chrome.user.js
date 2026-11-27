@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Send to Chrome
 // @namespace    https://github.com/thekindlyone/castcouch
-// @version      4.5.0
+// @version      4.6.0
 // @description  anipm: opens the player in Chrome for Android, where it can be cast (Cast button). cinejoy: plays on the TV through the castcouch service on the home PC (castcouch button).
 // @match        *://anipm.pk/*
 // @match        *://*.anipm.pk/*
@@ -231,6 +231,7 @@ const currentStream = entries => recentStreams(entries)[0] ?? null;
 // The browser keeps only the first ~250 resource entries; a player's segments can fill that before the viewer
 // switches servers. An observer sees every request, so collect from the start.
 let lastSubtitle = null; // the subtitle file the player last loaded: the one picked in its Subtitles menu
+let subtitleList = null, subtitleVotes = null; // the lists the page loads, reused to choose English ourselves
 const seen = [], traffic = new Map(); // traffic: "host type .ext" -> count, for diagnostics (no paths or tokens)
 function watchStreams() {
   try {
@@ -238,6 +239,8 @@ function watchStreams() {
       for (const e of list.getEntries()) {
         if (isStreamUrl(e.name)) seen.push({ name: e.name, initiatorType: e.initiatorType });
         if (isSubtitleUrl(e.name)) lastSubtitle = e.name;
+        else if (/\/subtitles\?/.test(e.name)) subtitleList = e.name; // the page's list of every subtitle file
+        else if (/\/votes\//.test(e.name)) subtitleVotes = e.name;
         const u = parse(e.name), ext = (u?.pathname.match(/\.(\w{2,5})$/) || [, '-'])[1];
         const k = `${u?.host} ${e.initiatorType} .${ext}`;
         if (traffic.size < 60 || traffic.has(k)) traffic.set(k, (traffic.get(k) || 0) + 1);
@@ -262,14 +265,36 @@ function subtitleName(url) {
   return /\.(srt|vtt)$/i.test(last) ? decodeURIComponent(last) : 'Subtitles';
 }
 
-// The picked subtitles' text (the page already downloaded it, so this comes from the same place) and name.
-async function pickedSubtitles() {
-  if (!lastSubtitle) return null;
+// list: the page's subtitle list ({subtitles: [{url, language, display, voteRef}]}); votes: {votes: {ref: {up, down}}}.
+// The English file with the best vote balance; the list's own order breaks ties. Null if there is none.
+function bestEnglish(list, votes) {
+  const score = x => { const v = votes?.votes?.[x.voteRef]; return v ? (v.up || 0) - (v.down || 0) : 0; };
+  const en = (list?.subtitles || []).map((x, i) => ({ x, i })).filter(({ x }) => /^en/i.test(x.language || '') && x.url);
+  en.sort((a, b) => score(b.x) - score(a.x) || a.i - b.i);
+  return en[0] ? { url: en[0].x.url, label: en[0].x.display || subtitleName(en[0].x.url) } : null;
+}
+
+const autoEnglish = () => typeof GM_getValue !== 'function' || GM_getValue('autoEnglish', true) !== false;
+function toggleAutoEnglish() {
+  GM_setValue('autoEnglish', !autoEnglish());
+  alert(`English subtitles chosen automatically: ${autoEnglish() ? 'on' : 'off'}.\nSubtitles picked in the player are always used first.`);
+}
+
+const getJson = async url => { try { const r = await fetch(url, { signal: AbortSignal.timeout(10000) }); return r.ok ? await r.json() : null; } catch { return null; } };
+
+// The subtitles to send: the ones picked in the player, else (if allowed) the best English file. Null for none.
+async function pickedSubtitles(auto = true) {
+  let url = lastSubtitle, label = null;
+  if (!url && auto && autoEnglish() && subtitleList) {
+    const best = bestEnglish(await getJson(subtitleList), subtitleVotes && await getJson(subtitleVotes));
+    if (best) ({ url, label } = best);
+  }
+  if (!url) return null;
   try {
-    const r = await fetch(lastSubtitle, { signal: AbortSignal.timeout(10000) });
+    const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
     if (!r.ok) return null;
-    const track = [...document.querySelectorAll('track')].find(t => t.src === lastSubtitle);
-    return { text: await r.text(), label: track?.label || subtitleName(lastSubtitle) };
+    const track = [...document.querySelectorAll('track')].find(t => t.src === url);
+    return { text: await r.text(), label: label || track?.label || subtitleName(url), auto: url !== lastSubtitle };
   } catch { return null; }
 }
 
@@ -280,7 +305,7 @@ const streamsNow = () => recentStreams(streamEntries(), 5, document.querySelecto
 function diagnostics() {
   const v = document.querySelector('video'), src = parse(v?.currentSrc || '');
   return {
-    script: '4.5.0', ua: navigator.userAgent.slice(0, 160),
+    script: '4.6.0', ua: navigator.userAgent.slice(0, 160),
     video: src ? `${src.protocol}//${src.host}${/\.m3u8$/i.test(src.pathname) ? ' (.m3u8)' : ''}` : 'none',
     traffic: [...traffic].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} x${n}`).slice(0, 40),
   };
@@ -348,7 +373,7 @@ function tvPanel(r) {
     row('button', 'Use the subtitles picked in the player', {
       onclick: async () => {
         sub.textContent = 'Sending subtitles…';
-        const picked = await pickedSubtitles();
+        const picked = await pickedSubtitles(false);
         if (!picked) { sub.textContent = 'No subtitles picked in the player yet: close this, choose them under Subtitles in the player, then come back.'; return; }
         update(await relayCall('/subtitles', { subtitles: picked }, 30000));
       },
@@ -430,6 +455,7 @@ function main() {
       watchStreams();
       GM_registerMenuCommand('Play on TV (castcouch service)', playOnTv);
       GM_registerMenuCommand('Set castcouch service address', setRelay);
+      GM_registerMenuCommand('English subtitles automatically: on/off', toggleAutoEnglish);
     } else {
       GM_registerMenuCommand('Open player in Chrome', openInChrome);
       GM_registerMenuCommand('Open player in Chrome (tap a link)', () => { const u = findPlayer(); showPanel(u); return u; });

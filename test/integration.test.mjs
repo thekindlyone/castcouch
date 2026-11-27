@@ -47,7 +47,7 @@ test('commands are registered in the right frames', async () => {
   assert.deepEqual(await frame.evaluate(() => Object.keys(__cmd)), ['[player] Copy stream URL']);
   await ctx.close();
   const w = await open('', 'watch/movie/1'); // cinejoy-style: TV only, no Chrome
-  assert.deepEqual(await w.page.evaluate(() => Object.keys(__cmd)), ['Play on TV (castcouch service)', 'Set castcouch service address']);
+  assert.deepEqual(await w.page.evaluate(() => Object.keys(__cmd)), ['Play on TV (castcouch service)', 'Set castcouch service address', 'English subtitles automatically: on/off']);
   await w.ctx.close();
 });
 
@@ -297,6 +297,17 @@ test('TV: subtitles picked in the player go to the TV, can be switched off and o
   assert.equal(tvEvents.some(e => e.type === 'LOAD'), false, 'not restarted');
   await panel.getByRole('button', { name: "Start again from the phone's position" }).waitFor();
   await panel.getByRole('button', { name: 'Stop' }).click();
+  await ctx.close();
+});
+
+test('TV: no subtitles picked → the most up-voted English file from the page\'s own list is sent', async () => {
+  const { ctx, page } = await open('sublist=1', 'watch/movie/12');
+  await playing(page);
+  tvEvents.length = 0;
+  const r = await page.evaluate(() => __cmd['Play on TV (castcouch service)']());
+  assert.equal(r.subtitles, 'Best English.srt', JSON.stringify(r));
+  assert.ok(tvEvents.find(e => e.track)?.track_text.includes('Hello from the harness'));
+  await page.locator('#stc-tv').getByRole('button', { name: 'Stop' }).click();
   await ctx.close();
 });
 

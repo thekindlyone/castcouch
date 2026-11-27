@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -273,6 +274,190 @@ class Service(unittest.TestCase):
     def test_remote_page(self):
         with urllib.request.urlopen('http://127.0.0.1:%d/' % self.port, timeout=5) as r:
             self.assertIn(b'castcouch remote', r.read())
+
+
+def make_library(root):
+    """A small Movies folder: films in their own folders with Subs, one loose film, a sample and a tiny file."""
+    def put(rel, data):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            f.write(data)
+        return path
+    film = bytes(range(256)) * 1200  # 300 KB
+    put('Knives.Out.2019.1080p.WEBRip.x264-RARBG/Knives.Out.2019.1080p.WEBRip.x264-RARBG.mp4', film)
+    put('Knives.Out.2019.1080p.WEBRip.x264-RARBG/Subs/3_French.srt', b'1\n00:00:01,000 --> 00:00:02,000\nBonjour\n')
+    put('Knives.Out.2019.1080p.WEBRip.x264-RARBG/Subs/2_English.srt', b'1\n00:00:01,000 --> 00:00:02,000\nHello\n' * 50)
+    put('Knives.Out.2019.1080p.WEBRip.x264-RARBG/Sample/sample.mp4', film)
+    put('Oldboy (2003)/Oldboy.2003.mkv', film)
+    put('Oldboy (2003)/Oldboy.2003.kor.srt', b'1\n00:00:01,000 --> 00:00:02,000\nKorean\n')
+    put('Loose.Film.1999.DVDRip.avi', film)
+    put('Other.Film.srt', b'1\n00:00:01,000 --> 00:00:02,000\nNot mine\n')
+    put('tiny.mp4', b'x' * 10)
+    return film
+
+
+class LocalFilms(unittest.TestCase):
+    def test_titles(self):
+        for name, want in [('Knives.Out.2019.1080p.WEBRip.x264-RARBG', 'Knives Out (2019)'), ('Oldboy (2003)', 'Oldboy (2003)'),
+                           ('Serenity[2005][Aka.Firefly]DvDrip[Eng]-aXXo', 'Serenity (2005)'), ('John Rambo', 'John Rambo'),
+                           ('The.Man.From.Nowhere.720p.BDRip.x264.mkv', 'The Man From Nowhere'), ('12 Angry Men(1957)', '12 Angry Men (1957)'),
+                           ('Wonder.Woman.1984.2020.IMAX.1080p.WEB.H264-NOGRP.mkv', 'Wonder Woman 1984 (2020)'),
+                           ('Blade.Runner.2049.2017.1080p.mkv', 'Blade Runner 2049 (2017)'), ('1917.2019.720p.mp4', '1917 (2019)'),
+                           ('Jalsa 2022 Hindi 720p AMZN WEBRip AAC 5.1 ESubs x264', 'Jalsa (2022)'), ('[AnimeRG] Boruto 2015 1080p', 'Boruto (2015)')]:
+            self.assertEqual(ch.nice_title(name), want, name)
+
+    def test_generic_names_and_quality(self):
+        self.assertTrue(ch.generic_name('part2.mp4') and ch.generic_name('CD1.avi') and not ch.generic_name('Partisan.2015.mp4'))
+        self.assertEqual((ch.quality('X.2019.1080p.WEB.mkv'), ch.quality('X.mkv')), ('1080p', None))
+
+    def test_scan_and_subtitle_choice(self):
+        import tempfile
+        root = tempfile.mkdtemp()
+        make_library(root)
+        lib = ch.Library([root], min_size=1000)
+        items = {i['title']: i for i in lib.listing()}
+        self.assertEqual(sorted(items), ['Knives Out (2019)', 'Loose Film (1999)', 'Oldboy (2003)'])
+        self.assertTrue(items['Knives Out (2019)']['subs'])
+        self.assertFalse(items['Oldboy (2003)']['subs'], 'a Korean file is not English')
+        self.assertFalse(items['Loose Film (1999)']['subs'], 'a loose film does not take another film\'s file')
+        self.assertTrue(items['Loose Film (1999)']['maybe'])
+        k = lib.get(items['Knives Out (2019)']['id'])
+        self.assertTrue(ch.local_subtitles(k['path'], k['own_folder']).endswith('2_English.srt'))
+        self.assertEqual(ch.Library([root], min_size=1000).listing()[0]['id'], lib.listing()[0]['id'], 'ids are stable')
+        with self.assertRaises(ch.Failure):
+            lib.get('nope')
+
+    def test_opensubtitles_hash(self):
+        import tempfile, struct
+        path = os.path.join(tempfile.mkdtemp(), 'f.bin')
+        data = os.urandom(300000)
+        open(path, 'wb').write(data)
+        want = len(data)
+        for chunk in (data[:65536], data[-65536:]):
+            want = (want + sum(struct.unpack('<8192Q', chunk))) % 2**64
+        self.assertEqual(ch.opensubtitles_hash(path), '%016x' % want)
+        open(path, 'wb').write(b'x' * 1000)
+        self.assertIsNone(ch.opensubtitles_hash(path))
+
+
+class FakeOpenSubtitles:
+    """api.opensubtitles.com in miniature: search (by moviehash or query) and download."""
+
+    def __init__(self):
+        self.calls, fake = [], self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def answer(self, obj, ctype='application/json'):
+                body = obj if isinstance(obj, bytes) else json.dumps(obj).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                fake.calls.append(('GET', self.path, self.headers.get('Api-Key'), self.headers.get('User-Agent')))
+                if self.path.startswith('/subtitles'):
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    if 'moviehash' in q:
+                        return self.answer({'data': []})  # no fingerprint match: fall back to the title
+                    return self.answer({'data': [
+                        {'attributes': {'release': 'Worse', 'download_count': 5, 'files': [{'file_id': 1}]}},
+                        {'attributes': {'release': 'Loose.Film.1999.BluRay', 'download_count': 900, 'from_trusted': True, 'files': [{'file_id': 2}]}}]})
+                if self.path == '/file/2.srt':
+                    return self.answer(b'1\r\n00:00:05,000 --> 00:00:07,000\r\nFrom OpenSubtitles\r\n', 'application/x-subrip')
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                fake.calls.append(('POST', self.path, body))
+                self.answer({'link': '%s/file/%d.srt' % (fake.base, body['file_id']), 'remaining': 19})
+        self.httpd = ThreadingHTTPServer(('127.0.0.1', 0), H)
+        self.base = 'http://127.0.0.1:%d' % self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+
+class LocalService(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+        self.root = os.path.join(self.dir, 'Movies')
+        self.film = make_library(self.root)
+        self.os = FakeOpenSubtitles()
+        self.tv = FakeTV()
+        self.port = free_port()
+        self.home = ch.Home(self.port, '127.0.0.1:%d' % self.tv.port, state=os.path.join(self.dir, 'session.json'),
+                            library=ch.Library([self.root], min_size=1000),
+                            opensubtitles=ch.OpenSubtitles('test-key', os.path.join(self.dir, 'subtitles'), self.os.base))
+        self.httpd = ch.ThreadingHTTPServer(('127.0.0.1', self.port), ch.make_handler(self.home))
+        self.httpd.daemon_threads = True
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.films = {f['title']: f for f in call(self.port, '/library')[1]['items']}
+
+    def tearDown(self):
+        if self.home.cast:
+            self.home.cast.close()
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.os.httpd.shutdown()
+        self.tv.close()
+
+    def test_plays_a_film_with_its_english_subtitles(self):
+        r = call(self.port, '/play-local', {'id': self.films['Knives Out (2019)']['id'], 'position': 30})[1]
+        self.assertEqual((r['ok'], r['subtitles'], r['subtitles_from']), (True, '2_English.srt', 'beside the film'), r)
+        got = [e for e in self.tv.events if 'fetched' in e][-1]
+        self.assertEqual((got['file_status'], got['file_type'], got['file_bytes'], got['position']), (206, 'video/mp4', 1024, 30))
+        self.assertIn('Hello', [e for e in self.tv.events if 'track' in e][-1]['track_text'])
+        url = got['fetched']
+        # Byte ranges, as players read and seek: middle, the last bytes, beyond the end.
+        req = urllib.request.Request(url, headers={'Range': 'bytes=1000-1009'})
+        with urllib.request.urlopen(req, timeout=5) as r2:
+            self.assertEqual((r2.status, r2.read(), r2.headers['Content-Range']), (206, self.film[1000:1010], 'bytes 1000-1009/%d' % len(self.film)))
+        with urllib.request.urlopen(urllib.request.Request(url, headers={'Range': 'bytes=-5'}), timeout=5) as r2:
+            self.assertEqual(r2.read(), self.film[-5:])
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(urllib.request.Request(url, headers={'Range': 'bytes=%d-' % len(self.film)}), timeout=5)
+        self.assertEqual(e.exception.code, 416)
+        with urllib.request.urlopen(url, timeout=5) as r2:
+            self.assertEqual(r2.read(), self.film)
+        self.assertEqual(call(self.port, '/status')[1]['local'], True)
+
+    def test_mkv_and_no_local_english_uses_opensubtitles(self):
+        r = call(self.port, '/play-local', {'id': self.films['Loose Film (1999)']['id']})[1]
+        self.assertEqual((r['subtitles'], r['subtitles_from']), ('Loose.Film.1999.BluRay', 'OpenSubtitles'), r)
+        self.assertIn('From OpenSubtitles', [e for e in self.tv.events if 'track' in e][-1]['track_text'])
+        searches = [c for c in self.os.calls if c[0] == 'GET' and c[1].startswith('/subtitles')]
+        self.assertIn('moviehash=', searches[0][1], 'fingerprint first')
+        self.assertIn('query=Loose+Film', searches[1][1])
+        self.assertIn('year=1999', searches[1][1])
+        self.assertEqual(searches[0][2], 'test-key')
+        self.assertTrue(searches[0][3].startswith('castcouch v'))
+        self.assertEqual([c[2] for c in self.os.calls if c[0] == 'POST'], [{'file_id': 2}], 'the most downloaded, trusted one')
+        n = len(self.os.calls)
+        call(self.port, '/play-local', {'id': self.films['Loose Film (1999)']['id']})
+        self.assertEqual(len(self.os.calls), n, 'second time from the cache')
+
+    def test_without_subtitles_and_type(self):
+        r = call(self.port, '/play-local', {'id': self.films['Oldboy (2003)']['id'], 'subtitles': False})[1]
+        self.assertEqual(r['has_subtitles'], False)
+        self.assertEqual([e for e in self.tv.events if 'fetched' in e][-1]['content_type'], 'video/x-matroska')
+        self.assertEqual(call(self.port, '/play-local', {'id': 'nope'})[1]['code'], 'not-found')
+
+    def test_restart_keeps_serving_the_file(self):
+        call(self.port, '/play-local', {'id': self.films['Knives Out (2019)']['id']})
+        url = [e for e in self.tv.events if 'fetched' in e][-1]['fetched']
+        self.home.cast.close()
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.home = ch.Home(self.port, '127.0.0.1:%d' % self.tv.port, state=os.path.join(self.dir, 'session.json'))
+        self.httpd = ch.ThreadingHTTPServer(('127.0.0.1', self.port), ch.make_handler(self.home))
+        self.httpd.daemon_threads = True
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        with urllib.request.urlopen(urllib.request.Request(url, headers={'Range': 'bytes=0-9'}), timeout=5) as r:
+            self.assertEqual(r.read(), self.film[:10])
 
 
 class Supervisor(unittest.TestCase):

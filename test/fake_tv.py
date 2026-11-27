@@ -122,16 +122,26 @@ class FakeTV:
                     self.app = True
                     send('receiver-0', ns, self.receiver_status(0))
                 elif ns == 'media' and t == 'LOAD':
-                    url = d['media']['contentId']
+                    url, media = d['media']['contentId'], d['media']
+                    info = dict(fetched=url, position=d.get('currentTime'), title=media['metadata'].get('title'))
                     try:
-                        pl = urllib.request.urlopen(url, timeout=10).read().decode()
-                        first = [l for l in pl.splitlines() if l and not l.startswith('#')][0]
-                        seg = urllib.request.urlopen(urllib.parse.urljoin(url, first), timeout=10).read()
-                        ok = seg[:1] == b'\x47' and not self.fail_load
-                        self.event(fetched=url, segment_bytes=len(seg), ts_at_0=seg[:1] == b'\x47', position=d.get('currentTime'), title=d['media']['metadata'].get('title'))
-                        for t in d['media'].get('tracks') or []:
-                            with urllib.request.urlopen(t['trackContentId'], timeout=10) as tr:
-                                self.event(track=t, active=d.get('activeTrackIds'), track_type=tr.headers.get('Content-Type'),
+                        if media.get('contentType', '').startswith('video/'):  # a whole file: read its start, as a player does
+                            req = urllib.request.Request(url, headers={'Range': 'bytes=0-1023'})
+                            with urllib.request.urlopen(req, timeout=10) as fr:
+                                head = fr.read()
+                                info.update(file_status=fr.status, file_type=fr.headers.get('Content-Type'), file_bytes=len(head),
+                                            content_type=media['contentType'])
+                            ok = not self.fail_load
+                        else:
+                            pl = urllib.request.urlopen(url, timeout=10).read().decode()
+                            first = [l for l in pl.splitlines() if l and not l.startswith('#')][0]
+                            seg = urllib.request.urlopen(urllib.parse.urljoin(url, first), timeout=10).read()
+                            ok = seg[:1] == b'\x47' and not self.fail_load
+                            info.update(segment_bytes=len(seg), ts_at_0=seg[:1] == b'\x47')
+                        self.event(**info)
+                        for tr_ in media.get('tracks') or []:
+                            with urllib.request.urlopen(tr_['trackContentId'], timeout=10) as tr:
+                                self.event(track=tr_, active=d.get('activeTrackIds'), track_type=tr.headers.get('Content-Type'),
                                            track_cors=tr.headers.get('Access-Control-Allow-Origin'), track_text=tr.read().decode()[:400])
                     except Exception as e:
                         ok = False

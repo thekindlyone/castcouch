@@ -1,9 +1,10 @@
 # Installs the castcouch home service for the current Windows user, starts it, and has Windows start it
 # at every sign-in. A supervisor restarts the service if it exits or stops answering; Task Scheduler
 # starts the supervisor again within 5 minutes if that ever exits. Needs no administrator rights.
-#   powershell -ExecutionPolicy Bypass -File install.ps1 [-Python C:\path\to\python.exe] [-Port 8899] [-Force]
+#   powershell -ExecutionPolicy Bypass -File install.ps1 [-Python C:\path\to\python.exe] [-Port 8899] [-Library D:\Movies,E:\Movies] [-Force]
+# Settings live in config.json beside the service: film folders ("library") and an optional "opensubtitles_api_key".
 # It will not replace a running service while something is playing on the TV, unless -Force.
-param([string]$Python = '', [int]$Port = 8899, [switch]$Force)
+param([string]$Python = '', [int]$Port = 8899, [string[]]$Library = @(), [switch]$Force)
 $ErrorActionPreference = 'Stop'
 $name = 'castcouch-home'
 # Not under AppData: packaged apps (and tools they start) can have AppData writes redirected out of sight.
@@ -24,6 +25,14 @@ if (-not $Force) {
 
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Copy-Item -Force (Join-Path $PSScriptRoot 'castcouch_home.py') $dir
+
+# Settings: created once, then left to you (folders passed with -Library replace the list).
+$config = Join-Path $dir 'config.json'
+$settings = if (Test-Path $config) { Get-Content -Raw $config | ConvertFrom-Json } else { [pscustomobject]@{ library = @(); opensubtitles_api_key = '' } }
+# With -File, "D:\Movies,E:\Movies" arrives as one string: split it.
+$Library = @($Library | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($Library.Count) { $settings.library = @($Library | Where-Object { Test-Path $_ }) }
+[IO.File]::WriteAllText($config, ($settings | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
 
 # Replace any running copy.
 Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
@@ -51,4 +60,4 @@ for ($i = 0; $i -lt 30; $i++) {
 if (-not $r.ok) { throw "Installed, but the service is not answering on port $Port; see $dir\home.log" }
 $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.PrefixOrigin -eq 'Dhcp' } | Select-Object -First 1).IPAddress
 "castcouch home $($r.version) is running (pid $($r.pid)); TV: $($r.tv)"
-"Phone address: http://${ip}:$Port/   Log: $dir\home.log"
+"Phone address: http://${ip}:$Port/   Log: $dir\home.log   Settings: $config"
