@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = '1.0.1'
+VERSION = '1.0.2'
 UA = 'castcouch-relay/' + VERSION  # an honest name of our own; some CDNs refuse Python's default one
 RECEIVER = 'CC1AD845'  # Google's Default Media Receiver
 NS = 'urn:x-cast:com.google.cast.'
@@ -475,6 +475,9 @@ class Home:
                     log.info('stream %d of %d (%s): %s', i + 1, len(candidates), host(stream or ''), f.code)
                     first = first or f
             else:
+                diag = body.get('diagnostics')
+                if diag:
+                    log.info('no usable stream; phone reported: %s', json.dumps(diag)[:3000])
                 raise first
             cast = self.connection()
             sid = secrets.token_hex(6)

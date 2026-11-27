@@ -55,3 +55,12 @@ test('recentStreams: newest first, no repeats, only script-requested playlists',
   assert.deepEqual([...s.recentStreams([e(a), e('https://x/1.ts'), e(b), e(a), e('https://a.b/sub.m3u8', 'track')])], [a, b]);
   assert.deepEqual([...s.recentStreams([])], []);
 });
+
+test('recentStreams: a natively played stream (video request or video.src) counts, newest first', () => {
+  const e = (name, initiatorType) => ({ name, initiatorType });
+  const light = 'https://lightspeed.st/a.m3u8', polaris = 'https://erebus.cursed.st/playlists/movie/1/1080p.m3u8?token=x';
+  assert.deepEqual([...s.recentStreams([e(light, 'xmlhttprequest'), e(polaris, 'video')])], [polaris, light]);
+  assert.deepEqual([...s.recentStreams([e(light, 'xmlhttprequest')], 5, polaris)], [polaris, light]);
+  assert.deepEqual([...s.recentStreams([e(light, 'xmlhttprequest')], 5, 'blob:https://cinejoy.pk/1')], [light]);
+  assert.deepEqual([...s.recentStreams([e('https://a.b/sub.m3u8', 'track'), e('https://a.b/x.m3u8', 'link')])], []);
+});

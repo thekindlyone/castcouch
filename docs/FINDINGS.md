@@ -141,3 +141,12 @@ The receiver (Google default, `CC1AD845`) runs on another origin, so each server
   for the new playlist and sends it, keeping the position from before the switch. Real site, Firefox, fake TV: one tap
   on the default server → Light refused (404) → switched → Polaris played from 5:03. cinejoy has only the castcouch
   button now.
+
+## v4.4.1 (2026-11-28)
+
+- Phone with 4.3.1: the service log named only `lightspeed.st` (Light), 4–5 addresses per try, never Polaris
+  (`erebus.cursed.st`), though the player showed Polaris. Desktop Firefox records Polaris as an `xmlhttprequest`.
+  Unconfirmed guess: on Android, cinejoy hands Polaris to the `<video>` itself (Firefox for Android can play HLS
+  natively), a request type the script ignored. 4.4.1 also accepts `video`/`other` requests and the video's own
+  address, and on failure sends a summary of what the page loaded (hosts, request types, extensions; no paths or
+  tokens) that the service logs.

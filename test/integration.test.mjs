@@ -266,6 +266,16 @@ test('TV: refused and no way to switch → explains how to pick Polaris, nothing
   await ctx.close();
 });
 
+test('TV: a stream the <video> plays natively (as Firefox for Android can) is found and sent', async () => {
+  const { ctx, page } = await open('native=1', 'watch/movie/10');
+  await page.waitForTimeout(1500);
+  tvEvents.length = 0;
+  const r = await page.evaluate(() => __cmd['Play on TV (castcouch service)']());
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(tvEvents.find(e => e.fetched)?.ts_at_0);
+  await ctx.close();
+});
+
 test('TV: before any video has loaded → asks to start the film first', async () => {
   const { ctx, page } = await open('nostream=1', 'watch/movie/9');
   const r = await page.evaluate(() => __cmd['Play on TV (castcouch service)']());

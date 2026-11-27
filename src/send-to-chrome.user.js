@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Send to Chrome
 // @namespace    https://github.com/thekindlyone/castcouch
-// @version      4.4.0
+// @version      4.4.1
 // @description  anipm: opens the player in Chrome for Android, where it can be cast (Cast button). cinejoy: plays on the TV through the castcouch service on the home PC (castcouch button).
 // @match        *://anipm.pk/*
 // @match        *://*.anipm.pk/*
@@ -219,23 +219,42 @@ const RELAY_DEFAULT = '192.168.88.8:8899';
 const relayAddress = () => (typeof GM_getValue === 'function' && GM_getValue('relay', '')) || RELAY_DEFAULT;
 
 // Playlists the page's player requested, newest first (the newest is the server playing now), without repeats.
-function recentStreams(entries, max = 5) {
-  const c = entries.filter(e => isStreamUrl(e.name) && /^(fetch|xmlhttprequest)$/.test(e.initiatorType)).map(e => e.name);
+// Requests by script (hls.js) or by the <video> itself (a browser that plays HLS natively, as Firefox for Android
+// can); not subtitles, links or images. videoSrc, the address the video is playing, comes first if it is a stream.
+function recentStreams(entries, max = 5, videoSrc = null) {
+  const c = entries.filter(e => isStreamUrl(e.name) && /^(fetch|xmlhttprequest|video|other|)$/.test(e.initiatorType)).map(e => e.name);
+  if (isStreamUrl(videoSrc)) c.push(videoSrc);
   return [...new Set(c.reverse())].slice(0, max);
 }
 const currentStream = entries => recentStreams(entries)[0] ?? null;
 
 // The browser keeps only the first ~250 resource entries; a player's segments can fill that before the viewer
 // switches servers. An observer sees every request, so collect from the start.
-const seen = [];
+const seen = [], traffic = new Map(); // traffic: "host type .ext" -> count, for diagnostics (no paths or tokens)
 function watchStreams() {
   try {
     new PerformanceObserver(list => {
-      for (const e of list.getEntries()) if (isStreamUrl(e.name)) seen.push({ name: e.name, initiatorType: e.initiatorType });
+      for (const e of list.getEntries()) {
+        if (isStreamUrl(e.name)) seen.push({ name: e.name, initiatorType: e.initiatorType });
+        const u = parse(e.name), ext = (u?.pathname.match(/\.(\w{2,5})$/) || [, '-'])[1];
+        const k = `${u?.host} ${e.initiatorType} .${ext}`;
+        if (traffic.size < 60 || traffic.has(k)) traffic.set(k, (traffic.get(k) || 0) + 1);
+      }
     }).observe({ type: 'resource', buffered: true });
   } catch {}
 }
 const streamEntries = () => (seen.length ? seen : performance.getEntriesByType('resource'));
+const streamsNow = () => recentStreams(streamEntries(), 5, document.querySelector('video')?.currentSrc);
+
+// What the page loaded, without addresses: sent along so the PC's log can show why a stream was not found.
+function diagnostics() {
+  const v = document.querySelector('video'), src = parse(v?.currentSrc || '');
+  return {
+    script: '4.4.1', ua: navigator.userAgent.slice(0, 160),
+    video: src ? `${src.protocol}//${src.host}${/\.m3u8$/i.test(src.pathname) ? ' (.m3u8)' : ''}` : 'none',
+    traffic: [...traffic].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} x${n}`).slice(0, 40),
+  };
+}
 
 // Always resolves, to the service's reply or to an {ok:false} that says what went wrong.
 function relayCall(path, body, timeout = 10000) {
@@ -275,7 +294,7 @@ async function switchServer(name) {
 // Resolves to true once the player requests a playlist it had not before.
 async function newStream(before, ms) {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(500))
-    if (recentStreams(streamEntries()).some(u => !before.has(u))) return true;
+    if (streamsNow().some(u => !before.has(u))) return true;
   return false;
 }
 const clock = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s % 60).padStart(2, '0'); };
@@ -303,13 +322,13 @@ function tvPanel(r) {
 
 function sendToTv(streams, position) {
   return relayCall('/play', {
-    stream: streams[0], streams, page: location.href, position,
+    stream: streams[0], streams, page: location.href, position, diagnostics: diagnostics(),
     title: document.title.replace(/\s*[-|–]\s*cinejoy\s*$/i, ''),
   }, 60000);
 }
 
 async function playOnTv() {
-  const streams = recentStreams(streamEntries());
+  const streams = streamsNow();
   if (!streams.length) { const r = { ok: false, code: 'no-stream', message: 'No video stream found yet. Start the film, then tap castcouch again.' }; tvPanel(r); return r; }
   tvPanel({ busy: true, message: 'Sending to the TV…' });
   const position = document.querySelector('video')?.currentTime || 0; // now: switching servers rewinds the player
@@ -320,7 +339,7 @@ async function playOnTv() {
     const before = new Set(streams);
     if (await switchServer(FALLBACK_SERVER) && await newStream(before, 20000)) {
       tvPanel({ busy: true, message: `Sending ${FALLBACK_SERVER} to the TV…` });
-      r = await sendToTv(recentStreams(streamEntries()), position);
+      r = await sendToTv(streamsNow(), position);
     } else {
       r = { ok: false, code: 'switch-failed', message: `${r.message} Switching the player to ${FALLBACK_SERVER} by itself didn't work.` };
     }

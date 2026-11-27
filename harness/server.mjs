@@ -48,12 +48,12 @@ ${q.get('overlay') ? '<div id="overlay" style="position:fixed;inset:0;z-index:21
 
 // A site that is its own player: full-window hls.js video that toggles on tap, like cinejoy.
 // ?ref=1: stream from the Referer-checking path (refused off-site), with a Servers menu whose "Polaris" switches
-// to the open path; ?noswitch=1 leaves the menu out; ?nostream=1: no video loaded yet.
+// to the open path; ?noswitch=1 leaves the menu out; ?nostream=1: no video loaded yet; ?native=1: the <video> is given the playlist itself (native HLS).
 const pagePlayer = (player, q) => `<!doctype html><meta name=viewport content="width=device-width"><title>Watch</title><body style="margin:0;background:#000"><div id="box">
 <video muted autoplay loop playsinline style="position:fixed;inset:0;width:100%;height:100%;z-index:2147483647"></video></div>
 ${q.get('noswitch') ? '' : `<button aria-label="Servers" onclick="menu.hidden=false" style="position:fixed;bottom:10px;left:10px;z-index:2147483647">S</button>
 <div id="menu" hidden style="position:fixed;bottom:50px;left:10px;z-index:2147483647;background:#fff"><div>Light</div><div onclick="h.loadSource('http://${player}/v1/object/v2.master.abc');menu.hidden=true">Polaris</div></div>`}<script src="http://${player}/hls.js"></script><script>
-const v=document.querySelector('video'),h=new Hls({enableWorker:false});${q.get('nostream') ? '' : `h.loadSource('http://${player}/${q.get('ref') ? 'ref/master.m3u8' : 'v1/object/v2.master.abc'}');`}h.attachMedia(v);
+const v=document.querySelector('video'),h=new Hls({enableWorker:false});${q.get('native') ? `v.src='http://${player}/v1/object/v2.master.abc';` : `${q.get('nostream') ? '' : `h.loadSource('http://${player}/${q.get('ref') ? 'ref/master.m3u8' : 'v1/object/v2.master.abc'}');`}h.attachMedia(v);`}
 document.addEventListener('dblclick',()=>box.requestFullscreen());
 document.addEventListener('click',()=>v.paused?v.play():v.pause());</script>`;
 
