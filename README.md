@@ -22,6 +22,10 @@ stream the player is using, the PC relays it on the home network and tells the T
   Polaris itself (through the page's own Servers menu) and sends that. Putting Polaris first in Settings → Playback →
   Server Order skips the switch.
 - Firefox pauses, the TV starts where you were, and the panel has Pause/Resume/±30 s/Stop.
+- **Subtitles**: pick them in the player's own Subtitles menu first; castcouch sends that file (SRT, converted to
+  WebVTT) and the TV starts with them on. The panel switches them off/on, and *Use the subtitles picked in the player*
+  swaps in a different file mid-film (the TV reloads at its position). Tapping castcouch while that film is on the TV
+  opens these controls instead of starting over.
   The same controls are at `http://<PC>:8899/` (bookmark it).
 - If the PC is off or unreachable, the panel says so.
 - First tap: Tampermonkey asks to allow the connection to the PC. Allow it ("always").

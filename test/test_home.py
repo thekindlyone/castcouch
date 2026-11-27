@@ -200,6 +200,33 @@ class Service(unittest.TestCase):
         self.assertEqual(r['code'], 'stream-refused', 'the newest stream\'s error is the one reported')
         self.assertIn('127.0.0.1', r['message'], 'names the server')
 
+    def test_subtitles(self):
+        srt = '\ufeff1\r\n00:00:01,500 --> 00:00:03,000\r\n<font color="#ffff00">Hello</font> {\\an8}there\r\n\r\n2\r\n00:01:02,000 --> 00:01:04,250\r\nSecond\r\n'
+        status, r = self.play('/master.m3u8', subtitles={'text': srt, 'label': 'English (VETO)'})
+        self.assertEqual((r['ok'], r['subtitles']), (True, 'English (VETO)'), r)
+        tr = [e for e in self.tv.events if 'track' in e][-1]
+        self.assertEqual(tr['active'], [1])
+        self.assertTrue(tr['track_type'].startswith('text/vtt'))
+        self.assertEqual(tr['track_cors'], '*', 'the TV player needs CORS for subtitle files')
+        self.assertTrue(tr['track_text'].startswith('WEBVTT\n\n1\n00:00:01.500 --> 00:00:03.000\nHello there'), tr['track_text'])
+        self.assertEqual(call(self.port, '/control', {'action': 'subtitles-off'})[1]['subtitles'], None)
+        self.assertEqual(call(self.port, '/control', {'action': 'subtitles-on'})[1]['subtitles'], 'English (VETO)')
+        # Replace mid-film: reloaded at the TV's position, under a new file name.
+        call(self.port, '/control', {'action': 'seek', 'seconds': 100})
+        status, r = call(self.port, '/subtitles', {'subtitles': {'text': 'WEBVTT\n\n00:00.000 --> 00:01.000\nNew', 'label': 'Other'}})
+        self.assertEqual(r['subtitles'], 'Other')
+        tr2 = [e for e in self.tv.events if 'track' in e][-1]
+        self.assertNotEqual(tr2['track']['trackContentId'], tr['track']['trackContentId'])
+        self.assertIn('New', tr2['track_text'])
+        self.assertEqual([e for e in self.tv.events if 'fetched' in e][-1]['position'], 161.5)
+        self.assertFalse(call(self.port, '/subtitles', {'subtitles': None})[1]['has_subtitles'])
+
+    def test_no_subtitles(self):
+        self.play('/master.m3u8')
+        self.assertFalse([e for e in self.tv.events if 'track' in e])
+        self.assertEqual(call(self.port, '/control', {'action': 'subtitles-on'})[1]['code'], 'no-subtitles')
+        self.assertEqual(self.play('/master.m3u8', subtitles={'text': 'nothing timed', 'label': 'x'})[1]['code'], 'bad-subtitles')
+
     def test_tv_off(self):
         self.tv.close()
         status, r = self.play('/master.m3u8')

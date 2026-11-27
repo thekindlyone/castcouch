@@ -37,3 +37,10 @@ If 8 fails on the TV but 7 works: Android's own screen cast (Quick Settings → 
 - cinejoy now has only the green **castcouch** button (no Chrome Cast).
 - Start the film on any server and tap castcouch: on a server other than Polaris the panel should say it is switching
   to Polaris, then "Playing on …", and the TV starts where you were.
+
+### v4.5.0: subtitles
+
+1. In the player, Subtitles → English → pick a file. Then tap castcouch.
+2. Expect "Subtitles: on (<file name>)" in the panel and subtitles on the TV. Readable size? In sync?
+3. Subtitles off / on in the panel. Then close the panel, pick another file in the player, tap castcouch: the panel
+   should show the controls (not restart); *Use the subtitles picked in the player* should switch the TV to it.

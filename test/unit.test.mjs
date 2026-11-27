@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const code = fs.readFileSync(new URL('../src/send-to-chrome.user.js', import.meta.url), 'utf8');
-const s = vm.runInNewContext(code + '\n;({pagePlayerUrl,isPlayerUrl,pickPlayer,isStreamUrl,pickStream,currentStream,recentStreams,toChromeIntent,toVlcIntent})', { URL, TypeError });
+const s = vm.runInNewContext(code + '\n;({pagePlayerUrl,isPlayerUrl,pickPlayer,isStreamUrl,pickStream,currentStream,recentStreams,subtitleName,isSubtitleUrl,toChromeIntent,toVlcIntent})', { URL, TypeError, atob });
 const M = 'https://media.settlar.io/v1/object/';
 
 test('isStreamUrl', () => {
@@ -63,4 +63,16 @@ test('recentStreams: a natively played stream (video request or video.src) count
   assert.deepEqual([...s.recentStreams([e(light, 'xmlhttprequest')], 5, polaris)], [polaris, light]);
   assert.deepEqual([...s.recentStreams([e(light, 'xmlhttprequest')], 5, 'blob:https://cinejoy.pk/1')], [light]);
   assert.deepEqual([...s.recentStreams([e('https://a.b/sub.m3u8', 'track'), e('https://a.b/x.m3u8', 'link')])], []);
+});
+
+test('subtitles: which addresses count, and their readable names', () => {
+  const b64 = Buffer.from('https://mbpimages.chuaxin.com/movie_box/movie/srt/3/7/35837/957659/Shang-Chi.And.The.Legend.Of.The.Ten.Rings.2021.1080p.BluRay.x264-VETO.srt').toString('base64');
+  const url = 'https://subs2.wing.st/sub/' + b64;
+  assert.equal(s.isSubtitleUrl(url), true);
+  assert.equal(s.isSubtitleUrl('https://subs2.wing.st/subtitles?type=movie&tmdb=1'), false);
+  assert.equal(s.isSubtitleUrl('https://subs2.wing.st/votes/movie/1'), false);
+  assert.equal(s.isSubtitleUrl('http://127.0.0.1:8012/subs/en.srt'), true);
+  assert.equal(s.subtitleName(url), 'Shang-Chi.And.The.Legend.Of.The.Ten.Rings.2021.1080p.BluRay.x264-VETO.srt');
+  assert.equal(s.subtitleName('http://a/subs/My%20film.srt'), 'My film.srt');
+  assert.equal(s.subtitleName('https://subs2.wing.st/sub/@@@'), 'Subtitles');
 });

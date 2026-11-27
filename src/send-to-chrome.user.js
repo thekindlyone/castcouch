@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Send to Chrome
 // @namespace    https://github.com/thekindlyone/castcouch
-// @version      4.4.1
+// @version      4.5.0
 // @description  anipm: opens the player in Chrome for Android, where it can be cast (Cast button). cinejoy: plays on the TV through the castcouch service on the home PC (castcouch button).
 // @match        *://anipm.pk/*
 // @match        *://*.anipm.pk/*
@@ -230,12 +230,14 @@ const currentStream = entries => recentStreams(entries)[0] ?? null;
 
 // The browser keeps only the first ~250 resource entries; a player's segments can fill that before the viewer
 // switches servers. An observer sees every request, so collect from the start.
+let lastSubtitle = null; // the subtitle file the player last loaded: the one picked in its Subtitles menu
 const seen = [], traffic = new Map(); // traffic: "host type .ext" -> count, for diagnostics (no paths or tokens)
 function watchStreams() {
   try {
     new PerformanceObserver(list => {
       for (const e of list.getEntries()) {
         if (isStreamUrl(e.name)) seen.push({ name: e.name, initiatorType: e.initiatorType });
+        if (isSubtitleUrl(e.name)) lastSubtitle = e.name;
         const u = parse(e.name), ext = (u?.pathname.match(/\.(\w{2,5})$/) || [, '-'])[1];
         const k = `${u?.host} ${e.initiatorType} .${ext}`;
         if (traffic.size < 60 || traffic.has(k)) traffic.set(k, (traffic.get(k) || 0) + 1);
@@ -243,6 +245,34 @@ function watchStreams() {
     }).observe({ type: 'resource', buffered: true });
   } catch {}
 }
+// A single subtitle file (cinejoy: subs2.wing.st/sub/<id>, SRT), not the list of them.
+function isSubtitleUrl(url) {
+  const u = parse(url);
+  return isHttp(u) && (/\.(srt|vtt)$/i.test(u.pathname) || (/(^|\.)subs?\d*\./i.test(u.host) && /^\/sub\/./.test(u.pathname)));
+}
+
+// A readable name: cinejoy's address ends in the original file's address, base64-encoded.
+function subtitleName(url) {
+  const last = parse(url)?.pathname.split('/').pop() || '';
+  try {
+    const inner = atob(decodeURIComponent(last).replace(/-/g, '+').replace(/_/g, '/'));
+    const name = decodeURIComponent(parse(inner)?.pathname.split('/').pop() || '');
+    if (/\.(srt|vtt)$/i.test(name)) return name;
+  } catch {}
+  return /\.(srt|vtt)$/i.test(last) ? decodeURIComponent(last) : 'Subtitles';
+}
+
+// The picked subtitles' text (the page already downloaded it, so this comes from the same place) and name.
+async function pickedSubtitles() {
+  if (!lastSubtitle) return null;
+  try {
+    const r = await fetch(lastSubtitle, { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) return null;
+    const track = [...document.querySelectorAll('track')].find(t => t.src === lastSubtitle);
+    return { text: await r.text(), label: track?.label || subtitleName(lastSubtitle) };
+  } catch { return null; }
+}
+
 const streamEntries = () => (seen.length ? seen : performance.getEntriesByType('resource'));
 const streamsNow = () => recentStreams(streamEntries(), 5, document.querySelector('video')?.currentSrc);
 
@@ -250,7 +280,7 @@ const streamsNow = () => recentStreams(streamEntries(), 5, document.querySelecto
 function diagnostics() {
   const v = document.querySelector('video'), src = parse(v?.currentSrc || '');
   return {
-    script: '4.4.1', ua: navigator.userAgent.slice(0, 160),
+    script: '4.5.0', ua: navigator.userAgent.slice(0, 160),
     video: src ? `${src.protocol}//${src.host}${/\.m3u8$/i.test(src.pathname) ? ' (.m3u8)' : ''}` : 'none',
     traffic: [...traffic].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} x${n}`).slice(0, 40),
   };
@@ -306,11 +336,27 @@ function tvPanel(r) {
     line(r.message);
   } else if (r.ok) {
     const st = line(`Playing on ${r.tv || 'the TV'}: ${r.title || 'video'}`);
-    const act = (label, action, seconds) => row('button', label, {
-      onclick: async () => { const x = await relayCall('/control', { action, seconds }); st.textContent = x.ok ? (x.playing ? `${x.state.toLowerCase()} at ${clock(x.position)} on ${x.tv}` : 'Stopped.') : x.message; },
+    const sub = line('');
+    const showSubs = x => { sub.textContent = x.has_subtitles ? `Subtitles: ${x.subtitles ? 'on (' + x.subtitles + ')' : 'off'}` : 'Subtitles: none sent'; subBtn.textContent = x.subtitles ? 'Subtitles off' : 'Subtitles on'; subBtn.style.display = x.has_subtitles ? 'block' : 'none'; };
+    const update = x => {
+      st.textContent = x.ok ? (x.playing ? `${x.state.toLowerCase()} at ${clock(x.position)} on ${x.tv}` : 'Stopped.') : x.message;
+      if (x.ok) showSubs(x);
+    };
+    const act = (label, action, seconds) => row('button', label, { onclick: async () => update(await relayCall('/control', { action, seconds })) });
+    act('Pause', 'pause'); act('Resume', 'play'); act('Back 30 s', 'seek', -30); act('Forward 30 s', 'seek', 30);
+    const subBtn = row('button', 'Subtitles', { onclick: async () => update(await relayCall('/control', { action: subBtn.textContent === 'Subtitles off' ? 'subtitles-off' : 'subtitles-on' })) });
+    row('button', 'Use the subtitles picked in the player', {
+      onclick: async () => {
+        sub.textContent = 'Sending subtitles…';
+        const picked = await pickedSubtitles();
+        if (!picked) { sub.textContent = 'No subtitles picked in the player yet: close this, choose them under Subtitles in the player, then come back.'; return; }
+        update(await relayCall('/subtitles', { subtitles: picked }, 30000));
+      },
     });
-    act('Pause', 'pause'); act('Resume', 'play'); act('Back 30 s', 'seek', -30); act('Forward 30 s', 'seek', 30); act('Stop', 'stop');
+    act('Stop', 'stop');
+    row('button', 'Start again from the phone\'s position', { onclick: () => playOnTv(true) });
     row('a', 'Remote control page', { href: `http://${relayAddress()}/`, target: '_blank' });
+    showSubs(r);
   } else {
     line(r.message);
     if (TV_ADVICE[r.code]) line(TV_ADVICE[r.code]);
@@ -320,26 +366,32 @@ function tvPanel(r) {
   show();
 }
 
-function sendToTv(streams, position) {
+function sendToTv(streams, position, subtitles) {
   return relayCall('/play', {
-    stream: streams[0], streams, page: location.href, position, diagnostics: diagnostics(),
+    stream: streams[0], streams, page: location.href, position, diagnostics: diagnostics(), subtitles,
     title: document.title.replace(/\s*[-|–]\s*cinejoy\s*$/i, ''),
   }, 60000);
 }
 
-async function playOnTv() {
+async function playOnTv(restart = false) {
+  // Already on the TV from this page: show its controls rather than starting over.
+  if (restart !== true) {
+    const now = await relayCall('/status', null, 4000);
+    if (now.ok && now.playing && now.page === location.href) { tvPanel(now); return now; }
+  }
   const streams = streamsNow();
   if (!streams.length) { const r = { ok: false, code: 'no-stream', message: 'No video stream found yet. Start the film, then tap castcouch again.' }; tvPanel(r); return r; }
   tvPanel({ busy: true, message: 'Sending to the TV…' });
   const position = document.querySelector('video')?.currentTime || 0; // now: switching servers rewinds the player
-  let r = await sendToTv(streams, position);
+  const subtitles = await pickedSubtitles();
+  let r = await sendToTv(streams, position, subtitles);
   // This server only plays inside the site: switch the player to the one that plays anywhere, then send that.
   if (!r.ok && /^stream-(refused|unsupported)$/.test(r.code)) {
     tvPanel({ busy: true, message: `That server won't play on the TV. Switching the player to ${FALLBACK_SERVER}…` });
     const before = new Set(streams);
     if (await switchServer(FALLBACK_SERVER) && await newStream(before, 20000)) {
       tvPanel({ busy: true, message: `Sending ${FALLBACK_SERVER} to the TV…` });
-      r = await sendToTv(streamsNow(), position);
+      r = await sendToTv(streamsNow(), position, subtitles);
     } else {
       r = { ok: false, code: 'switch-failed', message: `${r.message} Switching the player to ${FALLBACK_SERVER} by itself didn't work.` };
     }

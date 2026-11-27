@@ -276,6 +276,30 @@ test('TV: a stream the <video> plays natively (as Firefox for Android can) is fo
   await ctx.close();
 });
 
+test('TV: subtitles picked in the player go to the TV, can be switched off and on; tapping again shows the controls', async () => {
+  const { ctx, page } = await open('sub=1', 'watch/movie/11');
+  await playing(page);
+  tvEvents.length = 0;
+  const r = await page.evaluate(() => __cmd['Play on TV (castcouch service)']());
+  assert.equal(r.subtitles, 'English test', JSON.stringify(r));
+  const tr = tvEvents.find(e => e.track);
+  assert.ok(tr && tr.track_text.startsWith('WEBVTT') && tr.track_text.includes('00:00:01.000 --> 00:00:04.000'), JSON.stringify(tr));
+  const panel = page.locator('#stc-tv');
+  await panel.getByText('Subtitles: on (English test)').waitFor();
+  await panel.getByRole('button', { name: 'Subtitles off' }).click();
+  await panel.getByText('Subtitles: off').waitFor({ timeout: 5000 });
+  await panel.getByRole('button', { name: 'Subtitles on' }).click();
+  await panel.getByText('Subtitles: on (English test)').waitFor({ timeout: 5000 });
+  await page.evaluate(() => document.getElementById('stc-tv').remove());
+  tvEvents.length = 0;
+  const again = await page.evaluate(() => __cmd['Play on TV (castcouch service)']());
+  assert.equal(again.playing, true);
+  assert.equal(tvEvents.some(e => e.type === 'LOAD'), false, 'not restarted');
+  await panel.getByRole('button', { name: "Start again from the phone's position" }).waitFor();
+  await panel.getByRole('button', { name: 'Stop' }).click();
+  await ctx.close();
+});
+
 test('TV: before any video has loaded → asks to start the film first', async () => {
   const { ctx, page } = await open('nostream=1', 'watch/movie/9');
   const r = await page.evaluate(() => __cmd['Play on TV (castcouch service)']());

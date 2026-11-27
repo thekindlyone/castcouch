@@ -129,14 +129,23 @@ class FakeTV:
                         seg = urllib.request.urlopen(urllib.parse.urljoin(url, first), timeout=10).read()
                         ok = seg[:1] == b'\x47' and not self.fail_load
                         self.event(fetched=url, segment_bytes=len(seg), ts_at_0=seg[:1] == b'\x47', position=d.get('currentTime'), title=d['media']['metadata'].get('title'))
+                        for t in d['media'].get('tracks') or []:
+                            with urllib.request.urlopen(t['trackContentId'], timeout=10) as tr:
+                                self.event(track=t, active=d.get('activeTrackIds'), track_type=tr.headers.get('Content-Type'),
+                                           track_cors=tr.headers.get('Access-Control-Allow-Origin'), track_text=tr.read().decode()[:400])
                     except Exception as e:
                         ok = False
                         self.event(fetch_error=str(e))
                     if ok:
-                        self.media = {'mediaSessionId': 1, 'playerState': 'PLAYING', 'currentTime': d.get('currentTime', 0)}
+                        self.media = {'mediaSessionId': 1, 'playerState': 'PLAYING', 'currentTime': d.get('currentTime', 0),
+                                      'activeTrackIds': d.get('activeTrackIds') or []}
                         send('web-1', ns, self.media_status(rid))
                     else:
                         send('web-1', ns, {'type': 'LOAD_FAILED', 'requestId': rid})
+                elif ns == 'media' and t == 'EDIT_TRACKS_INFO':
+                    if self.media:
+                        self.media['activeTrackIds'] = d.get('activeTrackIds', [])
+                    send('web-1', ns, self.media_status(rid))
                 elif ns == 'media' and t in ('PAUSE', 'PLAY', 'STOP', 'SEEK', 'GET_STATUS'):
                     if self.media and t == 'SEEK':
                         self.media['currentTime'] = d['currentTime']

@@ -150,3 +150,13 @@ The receiver (Google default, `CC1AD845`) runs on another origin, so each server
   natively), a request type the script ignored. 4.4.1 also accepts `video`/`other` requests and the video's own
   address, and on failure sends a summary of what the page loaded (hosts, request types, extensions; no paths or
   tokens) that the service logs.
+
+## Subtitles (v4.5.0, service 1.1.0, 2026-11-28)
+
+- Phone with 4.4.1 played The Batman on the TV: Light refused, switched to Polaris by itself (service log).
+- cinejoy lists subtitles from `subs2.wing.st/subtitles?type=movie&tmdb=<id>` and, when one is picked, fetches it
+  from `subs2.wing.st/sub/<base64 of the original file URL>`: SRT, `text/plain`, CORS `*`. It adds hundreds of
+  `<track>` elements (all `hidden`) and draws cues itself, so the picked file is recognised by that fetch.
+- The script re-reads the picked file in the page and sends its text; the service converts SRT to WebVTT (drops
+  `<font>` and `{\an8}`-style tags) and serves it with CORS `*` next to the stream; LOAD carries it as text track 1,
+  active. Real site + fake TV: VETO BluRay English file arrived as WebVTT and was switched on. Not yet seen on the TV.

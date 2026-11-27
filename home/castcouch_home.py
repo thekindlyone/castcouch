@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = '1.0.2'
+VERSION = '1.1.0'
 UA = 'castcouch-relay/' + VERSION  # an honest name of our own; some CDNs refuse Python's default one
 RECEIVER = 'CC1AD845'  # Google's Default Media Receiver
 NS = 'urn:x-cast:com.google.cast.'
@@ -113,6 +113,19 @@ def ts_offset(b):
     return None
 
 
+def to_vtt(text):
+    """SRT (or WebVTT) text -> WebVTT the TV can show. Drops styling the TV would print literally."""
+    text = (text or '').lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n')
+    if not text.lstrip().startswith('WEBVTT'):
+        text = re.sub(r'(\d{1,2}:\d{2}:\d{2}),(\d{3})', r'\1.\2', text)  # 00:01:02,345 -> 00:01:02.345
+        text = 'WEBVTT\n\n' + text.strip() + '\n'
+    text = re.sub(r'</?font[^>]*>', '', text, flags=re.I)  # SRT colours
+    text = re.sub(r'\{\\[^}]*\}', '', text)  # ASS overrides such as {\an8}
+    if '-->' not in text:
+        raise Failure('bad-subtitles', 'The subtitle file has no timed lines.', 400)
+    return text
+
+
 def prepare(stream):
     """Fetch and check a stream; returns (playlist, segment URLs)."""
     u = urllib.parse.urlparse(stream or '')
@@ -188,6 +201,7 @@ class Cast:
         self.cond = threading.Condition()
         self.replies, self.receiver, self.media = {}, None, None
         self.transport, self.req = None, 0
+        self.has_subtitles = False
         self.send_lock = threading.Lock()
         self.last_rx = time.time()
 
@@ -338,14 +352,21 @@ class Cast:
             self.transport = tid
             self.send(tid, 'tp.connection', {'type': 'CONNECT'})
 
-    def load(self, url, title, position):
-        r = self.request(self.transport, 'media', {
-            'type': 'LOAD', 'autoplay': True, 'currentTime': max(0.0, float(position or 0)),
-            'media': {'contentId': url, 'contentType': 'application/x-mpegurl', 'streamType': 'BUFFERED',
-                      'hlsSegmentFormat': 'ts', 'hlsVideoSegmentFormat': 'mpeg2_ts',
-                      'metadata': {'metadataType': 0, 'title': title or 'castcouch'}}}, timeout=45)
+    def load(self, url, title, position, subtitles=None):
+        """subtitles: (vtt url, name) or None. Shown from the start when given."""
+        media = {'contentId': url, 'contentType': 'application/x-mpegurl', 'streamType': 'BUFFERED',
+                 'hlsSegmentFormat': 'ts', 'hlsVideoSegmentFormat': 'mpeg2_ts',
+                 'metadata': {'metadataType': 0, 'title': title or 'castcouch'}}
+        payload = {'type': 'LOAD', 'autoplay': True, 'currentTime': max(0.0, float(position or 0)), 'media': media}
+        if subtitles:
+            media['tracks'] = [{'trackId': 1, 'type': 'TEXT', 'subtype': 'SUBTITLES', 'trackContentId': subtitles[0],
+                                'trackContentType': 'text/vtt', 'name': subtitles[1] or 'Subtitles', 'language': 'und'}]
+            media['textTrackStyle'] = {'backgroundColor': '#00000099', 'foregroundColor': '#FFFFFFFF', 'fontScale': 1.0}
+            payload['activeTrackIds'] = [1]
+        r = self.request(self.transport, 'media', payload, timeout=45)
         if r.get('type') != 'MEDIA_STATUS':
             raise Failure('tv-load-failed', 'The TV could not play this stream (%s).' % (r.get('detailedErrorCode') or r.get('type')))
+        self.has_subtitles = bool(subtitles)
         return self.media
 
     def control(self, action, seconds=0):
@@ -357,6 +378,10 @@ class Cast:
             payload = {'type': 'SEEK', 'mediaSessionId': sid, 'currentTime': pos}
         elif action in ('pause', 'play', 'stop'):
             payload = {'type': action.upper(), 'mediaSessionId': sid}
+        elif action in ('subtitles-on', 'subtitles-off'):
+            if not self.has_subtitles:
+                raise Failure('no-subtitles', 'No subtitles were sent with this video.', 409)
+            payload = {'type': 'EDIT_TRACKS_INFO', 'mediaSessionId': sid, 'activeTrackIds': [1] if action == 'subtitles-on' else []}
         else:
             raise Failure('bad-request', 'Unknown action.', 400)
         self.request(self.transport, 'media', payload, timeout=10)
@@ -479,15 +504,38 @@ class Home:
                 if diag:
                     log.info('no usable stream; phone reported: %s', json.dumps(diag)[:3000])
                 raise first
+            sub = body.get('subtitles') or None
+            vtt = to_vtt(sub.get('text')) if isinstance(sub, dict) and sub.get('text') else None
             cast = self.connection()
             sid = secrets.token_hex(6)
             self.session = {'id': sid, 'playlist': playlist, 'segs': segs, 'title': str(body.get('title') or '')[:200],
-                            'page': str(body.get('page') or '')[:500]}
-            url = 'http://%s:%d/s/%s/p.m3u8' % (self.lan_address(cast.host), self.port, sid)
+                            'page': str(body.get('page') or '')[:500], 'vtt': vtt, 'vtt_n': 0,
+                            'vtt_name': str((sub or {}).get('label') or '')[:200] if vtt else None}
+            self.base = 'http://%s:%d/s/%s/' % (self.lan_address(cast.host), self.port, sid)
             cast.launch()
-            media = cast.load(url, self.session['title'], body.get('position') or 0)
-            log.info('playing %r (%d segments) on %s', self.session['title'], len(segs), self.tv[2])
-            return {'ok': True, 'tv': self.tv[2], 'title': self.session['title'], 'state': (media or {}).get('playerState')}
+            media = cast.load(self.base + 'p.m3u8', self.session['title'], body.get('position') or 0, self.sub_track())
+            log.info('playing %r (%d segments%s) on %s', self.session['title'], len(segs), ', subtitles' if vtt else '', self.tv[2])
+            return dict(self.describe(media), title=self.session['title'])
+
+    def sub_track(self):
+        s = self.session
+        # A new name per version, so the TV does not reuse an older file it cached.
+        return (self.base + 'sub%d.vtt' % s['vtt_n'], s['vtt_name']) if s and s['vtt'] else None
+
+    def subtitles(self, body):
+        """Replace (or remove) the subtitles of what is playing; the TV reloads at its current position."""
+        with self.lock:
+            s = self.session
+            if not (s and self.cast and self.cast.alive and self.cast.media):
+                raise Failure('not-playing', 'Nothing from castcouch is playing on the TV.', 409)
+            sub = body.get('subtitles') or None
+            s['vtt'] = to_vtt(sub.get('text')) if isinstance(sub, dict) and sub.get('text') else None
+            s['vtt_name'] = str((sub or {}).get('label') or '')[:200] if s['vtt'] else None
+            s['vtt_n'] += 1
+            position = self.cast.refresh() and self.cast.media.get('currentTime') or 0
+            media = self.cast.load(self.base + 'p.m3u8', s['title'], position, self.sub_track())
+            log.info('subtitles %s for %r at %ds', 'replaced' if s['vtt'] else 'removed', s['title'], position)
+            return self.describe(media)
 
     def control(self, body):
         with self.lock:
@@ -507,9 +555,13 @@ class Home:
 
     def describe(self, media):
         on = bool(media) and media.get('playerState') not in (None, 'IDLE')
+        s = self.session or {}
+        active = (media or {}).get('activeTrackIds')
         return {'ok': True, 'playing': on, 'state': (media or {}).get('playerState', 'IDLE'),
                 'position': round(float((media or {}).get('currentTime') or 0)),
-                'title': (self.session or {}).get('title') if on else None, 'tv': self.tv[2] if self.tv else None}
+                'title': s.get('title') if on else None, 'page': s.get('page') if on else None,
+                'subtitles': (s.get('vtt_name') or 'on') if on and s.get('vtt') and (active is None or 1 in active) else None,
+                'has_subtitles': bool(on and s.get('vtt')), 'tv': self.tv[2] if self.tv else None}
 
     def segment(self, sid, n):
         s = self.session
@@ -526,9 +578,10 @@ padding:18px;font:18px sans-serif;border:0;border-radius:10px;background:#1a73e8
 .row button{flex:1}#s{min-height:3em}</style><h2>castcouch remote</h2><div id=s>…</div>
 <div class=row><button onclick="c('pause')">Pause</button><button onclick="c('play')">Play</button></div>
 <div class=row><button onclick="c('seek',-30)">−30 s</button><button onclick="c('seek',30)">+30 s</button></div>
+<div class=row><button onclick="c('subtitles-on')">Subtitles on</button><button onclick="c('subtitles-off')">Subtitles off</button></div>
 <button onclick="c('stop')" style="background:#c5221f">Stop</button><script>
 const t=s=>{const h=Math.floor(s/3600),m=Math.floor(s/60)%60;return(h?h+':':'')+String(m).padStart(h?2:1,'0')+':'+String(s%60).padStart(2,'0')};
-const show=r=>{document.getElementById('s').textContent=r.ok===false?r.message:(r.playing?(r.title||'Video')+' — '+r.state.toLowerCase()+' at '+t(r.position)+' on '+r.tv:'Nothing playing from castcouch.')};
+const show=r=>{document.getElementById('s').textContent=r.ok===false?r.message:(r.playing?(r.title||'Video')+' — '+r.state.toLowerCase()+' at '+t(r.position)+' on '+r.tv+(r.has_subtitles?(r.subtitles?' (subtitles on)':' (subtitles off)'):''):'Nothing playing from castcouch.')};
 async function c(action,seconds){show(await (await fetch('/control',{method:'POST',body:JSON.stringify({action,seconds})})).json())}
 async function poll(){try{show(await (await fetch('/status')).json())}catch(e){document.getElementById('s').textContent='Service not answering.'}}
 poll();setInterval(poll,3000)</script>'''
@@ -581,7 +634,7 @@ def make_handler(home):
 
         def body(self):
             n = int(self.headers.get('Content-Length') or 0)
-            if n > 65536:
+            if n > 4_000_000:  # subtitle files ride along
                 raise Failure('bad-request', 'Request too large.', 413)
             try:
                 return json.loads(self.rfile.read(n) or b'{}')
@@ -613,12 +666,16 @@ def make_handler(home):
                                         'tv': home.tv[2] if home.tv else None})
             if path == '/status':
                 return self.reply(200, home.status())
-            m = re.fullmatch(r'/s/([0-9a-f]+)/(p\.m3u8|(\d+)\.ts)', path)
+            m = re.fullmatch(r'/s/([0-9a-f]+)/(p\.m3u8|(\d+)\.ts|sub\d+\.vtt)', path)
             if not m:
                 return self.reply(404, {'ok': False, 'code': 'not-found', 'message': 'Not found.'})
             s = home.session
             if not s or s['id'] != m.group(1):
                 return self.reply(404, {'ok': False, 'code': 'gone', 'message': 'That video is no longer being relayed.'})
+            if m.group(2).startswith('sub'):
+                if not s.get('vtt'):
+                    return self.reply(404, {'ok': False, 'code': 'gone', 'message': 'No subtitles.'})
+                return self.reply(200, s['vtt'], 'text/vtt; charset=utf-8')
             if m.group(2) == 'p.m3u8':
                 return self.reply(200, s['playlist'], 'application/vnd.apple.mpegurl')
             self.reply(200, home.segment(m.group(1), int(m.group(3))), 'video/mp2t')
@@ -627,6 +684,8 @@ def make_handler(home):
             path = urllib.parse.urlparse(self.path).path
             if path == '/play':
                 return self.reply(200, home.play(self.body()))
+            if path == '/subtitles':
+                return self.reply(200, home.subtitles(self.body()))
             if path == '/control':
                 return self.reply(200, home.control(self.body()))
             self.reply(404, {'ok': False, 'code': 'not-found', 'message': 'Not found.'})
