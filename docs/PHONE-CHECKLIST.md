@@ -31,3 +31,9 @@ If 8 fails on the TV but 7 works: Android's own screen cast (Quick Settings → 
 7. On another server (e.g. the default one): the panel should explain and suggest Polaris; the TV is left alone.
 8. Turn the phone's Wi-Fi off and tap TV: the panel should say it can't reach the service and offer Chrome.
 9. Does the film play to the end? (Polaris links may expire; how long they last is not known.)
+
+### v4.4.0 changes
+
+- cinejoy now has only the green **castcouch** button (no Chrome Cast).
+- Start the film on any server and tap castcouch: on a server other than Polaris the panel should say it is switching
+  to Polaris, then "Playing on …", and the TV starts where you were.

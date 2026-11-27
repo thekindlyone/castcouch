@@ -17,14 +17,16 @@ export function makeMedia() {
   execFileSync('ffmpeg', ['-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=duration=20:size=640x360:rate=25', '-pix_fmt', 'yuv420p', '-g', '50', '-hls_time', '4', '-hls_list_size', '0', path.join(media, 'out.m3u8')]);
 }
 
-// The shipped script with harness hosts swapped in, so the real code is what gets tested.
-export function harnessScript(playerHost, siteHost) {
+// The shipped script with harness hosts swapped in, so the real code is what gets tested. pageHost is the
+// cinejoy-style site (its own player); siteHost the anipm-style one (framed player). They may be the same.
+export function harnessScript(playerHost, siteHost, pageHost = siteHost) {
+  const names = [...new Set([siteHost, pageHost, playerHost].map(h => h.split(':')[0]))];
   return fs.readFileSync(path.join(root, 'src/send-to-chrome.user.js'), 'utf8')
     .replace(/^const PLAYER_HOSTS = .*$/m, `const PLAYER_HOSTS = ['${playerHost}'];`)
-    .replace(/^const PAGE_PLAYER_HOSTS = .*$/m, `const PAGE_PLAYER_HOSTS = ['${siteHost}'];`)
+    .replace(/^const PAGE_PLAYER_HOSTS = .*$/m, `const PAGE_PLAYER_HOSTS = ['${pageHost}'];`)
     .replace(/^\/\/ @(downloadURL|updateURL).*\n/gm, '')
     .replace(/^\/\/ @name .*$/m, '// @name         Send to Chrome (harness)')
-    .replace(/^(\/\/ @match .*\n)+/m, `// @match        http://${siteHost.split(':')[0]}/*\n// @match        http://${playerHost.split(':')[0]}/*\n`);
+    .replace(/^(\/\/ @match .*\n)+/m, names.map(n => `// @match        http://${n}/*\n`).join(''));
 }
 
 const playerPage = q => `<!doctype html><title>Player</title><body style="margin:0"><video muted autoplay playsinline style="width:100%"></video>
@@ -45,9 +47,12 @@ ${q.get('header') ? '<header style="position:fixed;top:0;left:0;right:0;height:5
 ${q.get('overlay') ? '<div id="overlay" style="position:fixed;inset:0;z-index:2147483647"></div>' : ''}`;
 
 // A site that is its own player: full-window hls.js video that toggles on tap, like cinejoy.
-// ?ref=1: stream from the Referer-checking path; ?nostream=1: no video loaded yet.
+// ?ref=1: stream from the Referer-checking path (refused off-site), with a Servers menu whose "Polaris" switches
+// to the open path; ?noswitch=1 leaves the menu out; ?nostream=1: no video loaded yet.
 const pagePlayer = (player, q) => `<!doctype html><meta name=viewport content="width=device-width"><title>Watch</title><body style="margin:0;background:#000"><div id="box">
-<video muted autoplay loop playsinline style="position:fixed;inset:0;width:100%;height:100%;z-index:2147483647"></video></div><script src="http://${player}/hls.js"></script><script>
+<video muted autoplay loop playsinline style="position:fixed;inset:0;width:100%;height:100%;z-index:2147483647"></video></div>
+${q.get('noswitch') ? '' : `<button aria-label="Servers" onclick="menu.hidden=false" style="position:fixed;bottom:10px;left:10px;z-index:2147483647">S</button>
+<div id="menu" hidden style="position:fixed;bottom:50px;left:10px;z-index:2147483647;background:#fff"><div>Light</div><div onclick="h.loadSource('http://${player}/v1/object/v2.master.abc');menu.hidden=true">Polaris</div></div>`}<script src="http://${player}/hls.js"></script><script>
 const v=document.querySelector('video'),h=new Hls({enableWorker:false});${q.get('nostream') ? '' : `h.loadSource('http://${player}/${q.get('ref') ? 'ref/master.m3u8' : 'v1/object/v2.master.abc'}');`}h.attachMedia(v);
 document.addEventListener('dblclick',()=>box.requestFullscreen());
 document.addEventListener('click',()=>v.paused?v.play():v.pause());</script>`;

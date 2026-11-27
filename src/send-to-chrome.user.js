@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Send to Chrome
 // @namespace    https://github.com/thekindlyone/castcouch
-// @version      4.3.1
-// @description  Opens the video player in Chrome for Android, where it can be cast. Adds a Cast button to the page, and on cinejoy a TV button that plays through the castcouch home service.
+// @version      4.4.0
+// @description  anipm: opens the player in Chrome for Android, where it can be cast (Cast button). cinejoy: plays on the TV through the castcouch service on the home PC (castcouch button).
 // @match        *://anipm.pk/*
 // @match        *://*.anipm.pk/*
 // @match        *://ani.pm/*
@@ -143,12 +143,13 @@ function coversFrame(frame) {
   return document.elementFromPoint((b.left + b.right) / 2, (b.top + b.bottom) / 2) === frame;
 }
 
+// cinejoy-style sites: Chrome's Cast does not reach the TV there, so this is their only button.
 function makeTvButton() {
   const b = document.createElement('button');
-  b.textContent = 'TV';
+  b.textContent = 'castcouch';
   b.title = 'Play on the TV through the castcouch service on the PC';
   b.setAttribute('popover', 'manual');
-  b.style.cssText = button.style.cssText.replace('#1a73e8', '#188038');
+  b.style.cssText = 'position:fixed;inset:auto;top:10px;right:16px;height:36px;margin:0;padding:0 16px;border:0;border-radius:18px;background:#188038;color:#fff;font:600 14px/36px sans-serif;text-align:center;box-sizing:border-box;z-index:2147483647';
   // Its taps are its own: a site that toggles play on any tap must not see them.
   for (const t of ['click', 'pointerdown', 'pointerup']) b.addEventListener(t, e => e.stopPropagation());
   b.addEventListener('click', playOnTv);
@@ -157,28 +158,30 @@ function makeTvButton() {
 
 function updateButton() {
   const pageUrl = pagePlayerUrl(location.href);
-  const frame = pageUrl ? null : findPlayerFrame();
-  const url = pageUrl ?? frame?.src;
-  if (!url || (pageUrl && !pageButtonVisible())) { button?.remove(); tvButton?.remove(); return; }
-  button ??= makeButton();
-  button.style.left = pageUrl ? 'auto' : '124px'; // framed: gap between the logo and the header icons
-  button.style.right = pageUrl ? '16px' : 'auto';
-  button.href = toChromeIntent(url);
   // Firefox draws a fullscreen element over everything outside it, even popovers. A fullscreen <video>
   // or <iframe> cannot hold the button, so there it is simply not available.
   const fs = pageUrl ? document.fullscreenElement : null;
   const home = fs && !/^(VIDEO|IFRAME)$/.test(fs.tagName) ? fs : document.documentElement;
-  if (button.parentNode !== home) home.append(button);
-  if (button.showPopover && !button.matches(':popover-open')) button.showPopover();
-  button.style.visibility = 'visible';
+  const place = b => {
+    if (b.parentNode !== home) home.append(b);
+    if (b.showPopover && !b.matches(':popover-open')) b.showPopover();
+  };
   if (pageUrl) {
+    button?.remove();
+    if (!pageButtonVisible()) { tvButton?.remove(); return; }
     tvButton ??= makeTvButton();
-    tvButton.style.left = 'auto';
-    tvButton.style.right = '81px'; // left of Cast
-    if (tvButton.parentNode !== home) home.append(tvButton);
-    if (tvButton.showPopover && !tvButton.matches(':popover-open')) tvButton.showPopover();
+    place(tvButton);
+    return;
   }
-  if (frame) button.style.visibility = coversFrame(frame) ? 'hidden' : 'visible';
+  tvButton?.remove();
+  const frame = findPlayerFrame();
+  if (!frame) { button?.remove(); return; }
+  button ??= makeButton();
+  button.style.left = '124px'; // gap between the logo and the header icons
+  button.style.right = 'auto';
+  button.href = toChromeIntent(frame.src);
+  place(button);
+  button.style.visibility = coversFrame(frame) ? 'hidden' : 'visible';
 }
 
 // Modal <dialog>s are drawn in the top layer, above any z-index the site or an ad uses.
@@ -250,11 +253,31 @@ function relayCall(path, body, timeout = 10000) {
   }));
 }
 
-const TV_ADVICE = {
-  'stream-refused': 'This server only plays inside cinejoy. Switch the player to Polaris (Servers), or put Polaris first in Settings → Playback → Server Order.',
-  'stream-unsupported': 'Switch the player to Polaris (Servers) and try again.',
-  'stream-unreachable': 'Try again, or switch the player to Polaris.',
-};
+const FALLBACK_SERVER = 'Polaris'; // the cinejoy server whose streams play outside the site
+const MANUAL = `Open the player's Servers menu, pick ${FALLBACK_SERVER}, then tap castcouch again. (Settings → Playback → Server Order with ${FALLBACK_SERVER} first makes it the default.)`;
+const TV_ADVICE = { 'stream-refused': MANUAL, 'stream-unsupported': MANUAL, 'stream-unreachable': 'Try again in a moment.', 'switch-failed': MANUAL };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Picks a server in the page's own Servers menu, as the viewer would. False if the menu or server isn't found.
+async function switchServer(name) {
+  const label = e => ((e.getAttribute('aria-label') || '') + ' ' + (e.innerText || '')).trim();
+  const menu = [...document.querySelectorAll('button')].filter(e => /^servers?\b/i.test(label(e))).pop();
+  if (!menu) return false;
+  menu.click();
+  for (let i = 0; i < 10; i++) {
+    await sleep(300);
+    const item = [...document.querySelectorAll('button,[role=menuitem],[role=option],li,div')].filter(e => (e.innerText || '').trim() === name).pop();
+    if (item) { item.click(); return true; }
+  }
+  return false;
+}
+
+// Resolves to true once the player requests a playlist it had not before.
+async function newStream(before, ms) {
+  for (const end = Date.now() + ms; Date.now() < end; await sleep(500))
+    if (recentStreams(streamEntries()).some(u => !before.has(u))) return true;
+  return false;
+}
 const clock = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s % 60).padStart(2, '0'); };
 
 function tvPanel(r) {
@@ -273,22 +296,35 @@ function tvPanel(r) {
     line(r.message);
     if (TV_ADVICE[r.code]) line(TV_ADVICE[r.code]);
     row('button', 'Try again', { onclick: playOnTv });
-    const page = pagePlayerUrl(location.href);
-    if (page) row('a', 'Open in Chrome instead', { href: toChromeIntent(page), onclick: pausePlayer });
   }
   if (!r.busy) row('button', 'Close', { onclick: () => d.remove() });
   show();
 }
 
-async function playOnTv() {
-  const streams = recentStreams(streamEntries()), stream = streams[0];
-  if (!stream) { const r = { ok: false, code: 'no-stream', message: 'No video stream found yet. Start the film, then tap TV again.' }; tvPanel(r); return r; }
-  tvPanel({ busy: true, message: 'Sending to the TV…' });
-  const v = document.querySelector('video');
-  const r = await relayCall('/play', {
-    stream, streams, page: location.href, position: v?.currentTime || 0,
+function sendToTv(streams, position) {
+  return relayCall('/play', {
+    stream: streams[0], streams, page: location.href, position,
     title: document.title.replace(/\s*[-|–]\s*cinejoy\s*$/i, ''),
   }, 60000);
+}
+
+async function playOnTv() {
+  const streams = recentStreams(streamEntries());
+  if (!streams.length) { const r = { ok: false, code: 'no-stream', message: 'No video stream found yet. Start the film, then tap castcouch again.' }; tvPanel(r); return r; }
+  tvPanel({ busy: true, message: 'Sending to the TV…' });
+  const position = document.querySelector('video')?.currentTime || 0; // now: switching servers rewinds the player
+  let r = await sendToTv(streams, position);
+  // This server only plays inside the site: switch the player to the one that plays anywhere, then send that.
+  if (!r.ok && /^stream-(refused|unsupported)$/.test(r.code)) {
+    tvPanel({ busy: true, message: `That server won't play on the TV. Switching the player to ${FALLBACK_SERVER}…` });
+    const before = new Set(streams);
+    if (await switchServer(FALLBACK_SERVER) && await newStream(before, 20000)) {
+      tvPanel({ busy: true, message: `Sending ${FALLBACK_SERVER} to the TV…` });
+      r = await sendToTv(recentStreams(streamEntries()), position);
+    } else {
+      r = { ok: false, code: 'switch-failed', message: `${r.message} Switching the player to ${FALLBACK_SERVER} by itself didn't work.` };
+    }
+  }
   if (r.ok) pauseHere();
   tvPanel(r);
   return r;
@@ -319,12 +355,13 @@ function main() {
       return s;
     });
   } else if (window.top === window) {
-    GM_registerMenuCommand('Open player in Chrome', openInChrome);
-    GM_registerMenuCommand('Open player in Chrome (tap a link)', () => { const u = findPlayer(); showPanel(u); return u; });
     if (PAGE_PLAYER_HOSTS.includes(location.host)) {
       watchStreams();
       GM_registerMenuCommand('Play on TV (castcouch service)', playOnTv);
       GM_registerMenuCommand('Set castcouch service address', setRelay);
+    } else {
+      GM_registerMenuCommand('Open player in Chrome', openInChrome);
+      GM_registerMenuCommand('Open player in Chrome (tap a link)', () => { const u = findPlayer(); showPanel(u); return u; });
     }
     watchHold();
     for (const t of ['pointerdown', 'pointermove', 'keydown']) {

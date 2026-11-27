@@ -126,3 +126,18 @@ The receiver (Google default, `CC1AD845`) runs on another origin, so each server
   → "refused (HTTP 404)" with Polaris advice and nothing sent to the TV; Polaris → TV loaded the relayed 1080p stream at
   Firefox's position, Firefox paused, ±30 s worked, no pop-ups. Not yet tried from the phone on the real TV.
 - The PC never sleeps on mains power. It does not sign in automatically, so after a reboot the service starts at sign-in.
+
+## v4.3.1 / v4.4.0 (2026-11-28)
+
+- Phone, first try (4.3.0): the service was reached (6 requests in its log) but every stream was refused with 404
+  although the player showed Polaris. Which server was sent was not logged. Likely cause: the script read Firefox's
+  resource list, which keeps only the first ~250 entries. 4.3.1 collects playlists with a PerformanceObserver and
+  sends the newest few; the service tries them in order and names the refusing server. With the list forced to 50
+  entries on the real site, Polaris was still found and played (fake TV).
+- The service cannot find the Polaris link itself: cinejoy gets stream links through an encrypted request
+  (`api2.wing.st/g`, built by a WebAssembly module), and Polaris links carry a token. Reproducing that outside the
+  page would mean defeating that protection; not done.
+- 4.4.0 instead switches the page's own player to Polaris (its Servers menu) when the current server is refused, waits
+  for the new playlist and sends it, keeping the position from before the switch. Real site, Firefox, fake TV: one tap
+  on the default server → Light refused (404) → switched → Polaris played from 5:03. cinejoy has only the castcouch
+  button now.
