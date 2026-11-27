@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = '1.1.0'
+VERSION = '1.2.0'
 UA = 'castcouch-relay/' + VERSION  # an honest name of our own; some CDNs refuse Python's default one
 RECEIVER = 'CC1AD845'  # Google's Default Media Receiver
 NS = 'urn:x-cast:com.google.cast.'
@@ -437,12 +437,45 @@ def discover(timeout=3.0):
 # ---------------------------------------------------------------- service
 
 class Home:
-    def __init__(self, port, tv=None, tv_name=None):
+    def __init__(self, port, tv=None, tv_name=None, state=None):
         self.port, self.tv_fixed, self.tv_name = port, tv, tv_name
         self.tv = None  # (host, port, name)
         self.cast = None
-        self.session = None  # {'id', 'playlist', 'segs', 'title', 'page'}
+        self.session = None  # {'id', 'playlist', 'segs', 'title', 'page', 'vtt', ...}
+        self.base = None
         self.lock = threading.Lock()
+        # What is playing is kept on disk, so a restarted service (update, crash) keeps feeding the TV.
+        self.state = state
+        self.load_state()
+
+    def load_state(self):
+        try:
+            if self.state and time.time() - os.path.getmtime(self.state) < 12 * 3600:
+                with open(self.state, encoding='utf-8') as f:
+                    d = json.load(f)
+                self.session, self.base = d['session'], d['base']
+                log.info('resumed relaying %r', self.session.get('title'))
+        except (OSError, ValueError, KeyError) as e:
+            log.info('no saved session: %s', e)
+
+    def save_state(self):
+        if not self.state:
+            return
+        tmp = self.state + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({'session': self.session, 'base': self.base}, f)
+        os.replace(tmp, self.state)
+
+    def attach(self):
+        """A connection to the TV that knows our media, taking over a player started before a restart."""
+        cast = self.connection()
+        if not (cast.transport and cast.media):
+            app = cast.app()
+            if app and app.get('appId') == RECEIVER and app.get('transportId'):
+                cast.transport = app['transportId']
+                cast.send(cast.transport, 'tp.connection', {'type': 'CONNECT'})
+                cast.refresh()
+        return cast
 
     def find_tv(self, fresh=False):
         if self.tv_fixed:
@@ -514,6 +547,7 @@ class Home:
             self.base = 'http://%s:%d/s/%s/' % (self.lan_address(cast.host), self.port, sid)
             cast.launch()
             media = cast.load(self.base + 'p.m3u8', self.session['title'], body.get('position') or 0, self.sub_track())
+            self.save_state()
             log.info('playing %r (%d segments%s) on %s', self.session['title'], len(segs), ', subtitles' if vtt else '', self.tv[2])
             return dict(self.describe(media), title=self.session['title'])
 
@@ -526,7 +560,7 @@ class Home:
         """Replace (or remove) the subtitles of what is playing; the TV reloads at its current position."""
         with self.lock:
             s = self.session
-            if not (s and self.cast and self.cast.alive and self.cast.media):
+            if not (s and self.attach().media):
                 raise Failure('not-playing', 'Nothing from castcouch is playing on the TV.', 409)
             sub = body.get('subtitles') or None
             s['vtt'] = to_vtt(sub.get('text')) if isinstance(sub, dict) and sub.get('text') else None
@@ -534,23 +568,26 @@ class Home:
             s['vtt_n'] += 1
             position = self.cast.refresh() and self.cast.media.get('currentTime') or 0
             media = self.cast.load(self.base + 'p.m3u8', s['title'], position, self.sub_track())
+            self.save_state()
             log.info('subtitles %s for %r at %ds', 'replaced' if s['vtt'] else 'removed', s['title'], position)
             return self.describe(media)
 
     def control(self, body):
         with self.lock:
-            if not (self.cast and self.cast.alive):
+            if not self.session:
                 raise Failure('not-playing', 'Nothing from castcouch is playing on the TV.', 409)
-            media = self.cast.control(body.get('action'), body.get('seconds') or 0)
+            media = self.attach().control(body.get('action'), body.get('seconds') or 0)
             return self.describe(media)
 
     def status(self):
         media = None
-        if self.cast and self.cast.alive:
-            try:
+        try:
+            if self.cast and self.cast.alive:
                 media = self.cast.refresh()
-            except Failure:
-                media = None
+            elif self.session:  # after a restart: find out whether our player is still going
+                media = self.attach().media
+        except Failure:
+            media = None
         return self.describe(media)
 
     def describe(self, media):
@@ -693,7 +730,7 @@ def make_handler(home):
 
 
 def serve(args):
-    home = Home(args.port, args.tv, args.tv_name)
+    home = Home(args.port, args.tv, args.tv_name, args.state or os.path.join(os.path.dirname(args.log), 'session.json'))
     try:
         httpd = ThreadingHTTPServer((args.bind, args.port), make_handler(home))
     except OSError as e:
@@ -705,6 +742,9 @@ def serve(args):
         try:
             home.find_tv()
             log.info('TV: %s', home.tv)
+            if home.session:
+                media = home.attach().media
+                log.info('TV player after restart: %s', (media or {}).get('playerState', 'none'))
         except Failure as f:
             log.info('no TV yet: %s', f.message)
     threading.Thread(target=first_look, daemon=True).start()
@@ -811,6 +851,7 @@ def main(argv=None):
     p.add_argument('--tv', help='TV address as IP[:PORT]; default: find it on the network')
     p.add_argument('--tv-name', help='use the Cast device with this name')
     p.add_argument('--log', default=default_log())
+    p.add_argument('--state', help='where to keep what is playing (default: session.json beside the log)')
     p.add_argument('--supervise', action='store_true', help='keep the service running')
     p.add_argument('--check', type=float, default=30, help=argparse.SUPPRESS)
     args = p.parse_args(argv)

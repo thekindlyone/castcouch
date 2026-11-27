@@ -1,8 +1,9 @@
 # Installs the castcouch home service for the current Windows user, starts it, and has Windows start it
 # at every sign-in. A supervisor restarts the service if it exits or stops answering; Task Scheduler
 # starts the supervisor again within 5 minutes if that ever exits. Needs no administrator rights.
-#   powershell -ExecutionPolicy Bypass -File install.ps1 [-Python C:\path\to\python.exe] [-Port 8899]
-param([string]$Python = '', [int]$Port = 8899)
+#   powershell -ExecutionPolicy Bypass -File install.ps1 [-Python C:\path\to\python.exe] [-Port 8899] [-Force]
+# It will not replace a running service while something is playing on the TV, unless -Force.
+param([string]$Python = '', [int]$Port = 8899, [switch]$Force)
 $ErrorActionPreference = 'Stop'
 $name = 'castcouch-home'
 # Not under AppData: packaged apps (and tools they start) can have AppData writes redirected out of sight.
@@ -14,6 +15,12 @@ if (-not $Python) {
 if (-not $Python -or -not (Test-Path $Python)) { throw 'Python 3.9+ not found; pass -Python C:\path\to\python.exe' }
 $pythonw = Join-Path (Split-Path $Python) 'pythonw.exe'
 if (-not (Test-Path $pythonw)) { throw "pythonw.exe not found next to $Python" }
+
+# Do not interrupt a film: the running copy may be feeding the TV right now.
+if (-not $Force) {
+  try { $now = Invoke-RestMethod -TimeoutSec 15 "http://127.0.0.1:$Port/status" } catch { $now = $null }
+  if ($now.playing) { throw "Not updating: '$($now.title)' is $($now.state.ToLower()) on $($now.tv). Try again when it has finished, or use -Force." }
+}
 
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Copy-Item -Force (Join-Path $PSScriptRoot 'castcouch_home.py') $dir

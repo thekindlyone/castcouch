@@ -227,6 +227,27 @@ class Service(unittest.TestCase):
         self.assertEqual(call(self.port, '/control', {'action': 'subtitles-on'})[1]['code'], 'no-subtitles')
         self.assertEqual(self.play('/master.m3u8', subtitles={'text': 'nothing timed', 'label': 'x'})[1]['code'], 'bad-subtitles')
 
+    def test_restart_keeps_feeding_the_tv(self):
+        import tempfile
+        state = os.path.join(tempfile.mkdtemp(), 'session.json')
+        self.home.state = state
+        self.play('/master.m3u8', subtitles={'text': 'WEBVTT\n\n00:00.000 --> 00:01.000\nHi', 'label': 'En'})
+        url = [e for e in self.tv.events if 'fetched' in e][-1]['fetched']
+        # The service goes away (update, crash) and a new one starts on the same port.
+        self.home.cast.close()
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.home = ch.Home(self.port, '127.0.0.1:%d' % self.tv.port, state=state)
+        self.httpd = ch.ThreadingHTTPServer(('127.0.0.1', self.port), ch.make_handler(self.home))
+        self.httpd.daemon_threads = True
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        with urllib.request.urlopen(url.replace('p.m3u8', '0.ts'), timeout=10) as r:
+            self.assertEqual(r.status, 200, 'the TV can go on fetching the same film')
+        st = call(self.port, '/status')[1]
+        self.assertEqual((st['playing'], st['title'], st['subtitles']), (True, 'Film', 'En'), st)
+        self.assertEqual(call(self.port, '/control', {'action': 'pause'})[1]['state'], 'PAUSED')
+        self.assertEqual(sum(1 for e in self.tv.events if e.get('type') == 'LOAD'), 1, 'the TV was not restarted')
+
     def test_tv_off(self):
         self.tv.close()
         status, r = self.play('/master.m3u8')

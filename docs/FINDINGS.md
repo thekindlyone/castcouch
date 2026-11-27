@@ -160,3 +160,14 @@ The receiver (Google default, `CC1AD845`) runs on another origin, so each server
 - The script re-reads the picked file in the page and sends its text; the service converts SRT to WebVTT (drops
   `<font>` and `{\an8}`-style tags) and serves it with CORS `*` next to the stream; LOAD carries it as text track 1,
   active. Real site + fake TV: VETO BluRay English file arrived as WebVTT and was switched on. Not yet seen on the TV.
+
+## Playback stopped by an update (service 1.2.0, 2026-11-28)
+
+- The Batman stopped ~12 minutes in at 02:06:58: that was this project reinstalling the service (1.0.2 → 1.1.0) while it
+  played. The new process had no record of the film, so the TV's next segment requests failed. The TV's player
+  (default receiver) stayed open, so it does not quit when the sender's connection closes.
+- 1.2.0 keeps the playing session in `session.json` beside the log (stream segment URLs included, on this PC only)
+  and takes over the TV's player after a restart; tested with the fake TV: same film kept serving, controls and
+  subtitle state intact, no reload. `install.ps1` now refuses to replace the service while something plays (`-Force`
+  overrides).
+- Subtitles confirmed on the real TV: the service reported The Batman playing with an English SRT on.
