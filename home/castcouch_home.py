@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = '1.0.0'
+VERSION = '1.0.1'
 UA = 'castcouch-relay/' + VERSION  # an honest name of our own; some CDNs refuse Python's default one
 RECEIVER = 'CC1AD845'  # Google's Default Media Receiver
 NS = 'urn:x-cast:com.google.cast.'
@@ -54,9 +54,13 @@ def fetch(url, timeout=20):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read()
     except urllib.error.HTTPError as e:
-        raise Failure('stream-refused', 'The video server refused the PC (HTTP %d).' % e.code)
+        raise Failure('stream-refused', 'The video server (%s) refused the PC (HTTP %d).' % (host(url), e.code))
     except (urllib.error.URLError, OSError) as e:
-        raise Failure('stream-unreachable', 'The PC could not reach the video server (%s).' % getattr(e, 'reason', e))
+        raise Failure('stream-unreachable', 'The PC could not reach the video server %s (%s).' % (host(url), getattr(e, 'reason', e)))
+
+
+def host(url):
+    return urllib.parse.urlparse(url).hostname or '?'
 
 
 def uris(text):
@@ -459,7 +463,19 @@ class Home:
 
     def play(self, body):
         with self.lock:
-            playlist, segs = prepare(body.get('stream'))
+            # Newest first: the page's current server. Older ones are fallbacks if that one refuses.
+            candidates = [u for u in (body.get('streams') or [body.get('stream')]) if isinstance(u, str)][:6] or [None]
+            first = None
+            for i, stream in enumerate(candidates):
+                try:
+                    playlist, segs = prepare(stream)
+                    log.info('stream %d of %d accepted: %s', i + 1, len(candidates), host(stream or ''))
+                    break
+                except Failure as f:
+                    log.info('stream %d of %d (%s): %s', i + 1, len(candidates), host(stream or ''), f.code)
+                    first = first or f
+            else:
+                raise first
             cast = self.connection()
             sid = secrets.token_hex(6)
             self.session = {'id': sid, 'playlist': playlist, 'segs': segs, 'title': str(body.get('title') or '')[:200],

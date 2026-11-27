@@ -193,6 +193,13 @@ class Service(unittest.TestCase):
         self.assertEqual(call(self.port, '/control', {'action': 'pause'})[1]['code'], 'not-playing')
         self.assertFalse(any(e.get('type') == 'LOAD' for e in self.tv.events), 'nothing may reach the TV for a bad stream')
 
+    def test_falls_back_to_an_older_stream(self):
+        status, r = call(self.port, '/play', {'streams': [self.up.base + '/refused.m3u8', self.up.base + '/master.m3u8'], 'title': 'Film'})
+        self.assertTrue(r['ok'], r)
+        status, r = call(self.port, '/play', {'streams': [self.up.base + '/refused.m3u8', self.up.base + '/fmp4.m3u8']})
+        self.assertEqual(r['code'], 'stream-refused', 'the newest stream\'s error is the one reported')
+        self.assertIn('127.0.0.1', r['message'], 'names the server')
+
     def test_tv_off(self):
         self.tv.close()
         status, r = self.play('/master.m3u8')

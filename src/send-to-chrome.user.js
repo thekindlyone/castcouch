@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Send to Chrome
 // @namespace    https://github.com/thekindlyone/castcouch
-// @version      4.3.0
+// @version      4.3.1
 // @description  Opens the video player in Chrome for Android, where it can be cast. Adds a Cast button to the page, and on cinejoy a TV button that plays through the castcouch home service.
 // @match        *://anipm.pk/*
 // @match        *://*.anipm.pk/*
@@ -215,11 +215,24 @@ function showPanel(url) {
 const RELAY_DEFAULT = '192.168.88.8:8899';
 const relayAddress = () => (typeof GM_getValue === 'function' && GM_getValue('relay', '')) || RELAY_DEFAULT;
 
-// The newest playlist the page's player requested: the server it is playing from now.
-function currentStream(entries) {
-  const c = entries.filter(e => isStreamUrl(e.name) && /^(fetch|xmlhttprequest)$/.test(e.initiatorType));
-  return c.length ? c[c.length - 1].name : null;
+// Playlists the page's player requested, newest first (the newest is the server playing now), without repeats.
+function recentStreams(entries, max = 5) {
+  const c = entries.filter(e => isStreamUrl(e.name) && /^(fetch|xmlhttprequest)$/.test(e.initiatorType)).map(e => e.name);
+  return [...new Set(c.reverse())].slice(0, max);
 }
+const currentStream = entries => recentStreams(entries)[0] ?? null;
+
+// The browser keeps only the first ~250 resource entries; a player's segments can fill that before the viewer
+// switches servers. An observer sees every request, so collect from the start.
+const seen = [];
+function watchStreams() {
+  try {
+    new PerformanceObserver(list => {
+      for (const e of list.getEntries()) if (isStreamUrl(e.name)) seen.push({ name: e.name, initiatorType: e.initiatorType });
+    }).observe({ type: 'resource', buffered: true });
+  } catch {}
+}
+const streamEntries = () => (seen.length ? seen : performance.getEntriesByType('resource'));
 
 // Always resolves, to the service's reply or to an {ok:false} that says what went wrong.
 function relayCall(path, body, timeout = 10000) {
@@ -268,12 +281,12 @@ function tvPanel(r) {
 }
 
 async function playOnTv() {
-  const stream = currentStream(performance.getEntriesByType('resource'));
+  const streams = recentStreams(streamEntries()), stream = streams[0];
   if (!stream) { const r = { ok: false, code: 'no-stream', message: 'No video stream found yet. Start the film, then tap TV again.' }; tvPanel(r); return r; }
   tvPanel({ busy: true, message: 'Sending to the TV…' });
   const v = document.querySelector('video');
   const r = await relayCall('/play', {
-    stream, page: location.href, position: v?.currentTime || 0,
+    stream, streams, page: location.href, position: v?.currentTime || 0,
     title: document.title.replace(/\s*[-|–]\s*cinejoy\s*$/i, ''),
   }, 60000);
   if (r.ok) pauseHere();
@@ -309,6 +322,7 @@ function main() {
     GM_registerMenuCommand('Open player in Chrome', openInChrome);
     GM_registerMenuCommand('Open player in Chrome (tap a link)', () => { const u = findPlayer(); showPanel(u); return u; });
     if (PAGE_PLAYER_HOSTS.includes(location.host)) {
+      watchStreams();
       GM_registerMenuCommand('Play on TV (castcouch service)', playOnTv);
       GM_registerMenuCommand('Set castcouch service address', setRelay);
     }

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const code = fs.readFileSync(new URL('../src/send-to-chrome.user.js', import.meta.url), 'utf8');
-const s = vm.runInNewContext(code + '\n;({pagePlayerUrl,isPlayerUrl,pickPlayer,isStreamUrl,pickStream,currentStream,toChromeIntent,toVlcIntent})', { URL, TypeError });
+const s = vm.runInNewContext(code + '\n;({pagePlayerUrl,isPlayerUrl,pickPlayer,isStreamUrl,pickStream,currentStream,recentStreams,toChromeIntent,toVlcIntent})', { URL, TypeError });
 const M = 'https://media.settlar.io/v1/object/';
 
 test('isStreamUrl', () => {
@@ -47,4 +47,11 @@ test('currentStream takes the newest script-requested playlist (the server now p
   const old = 'https://lightspeed.st/hls/a/master.m3u8', now = 'https://erebus.cursed.st/p/b.m3u8?e=1';
   assert.equal(s.currentStream([e(old, 'xmlhttprequest'), e('https://lightspeed.st/x.png', 'xmlhttprequest'), e(now, 'fetch'), e('https://erebus.cursed.st/s1.ts', 'xmlhttprequest'), e('https://a.b/sub.m3u8', 'track')]), now);
   assert.equal(s.currentStream([e('blob:https://cinejoy.pk/1', 'video')]), null);
+});
+
+test('recentStreams: newest first, no repeats, only script-requested playlists', () => {
+  const e = (name, initiatorType = 'xmlhttprequest') => ({ name, initiatorType });
+  const a = 'https://lightspeed.st/a.m3u8', b = 'https://erebus.cursed.st/b.m3u8';
+  assert.deepEqual([...s.recentStreams([e(a), e('https://x/1.ts'), e(b), e(a), e('https://a.b/sub.m3u8', 'track')])], [a, b]);
+  assert.deepEqual([...s.recentStreams([])], []);
 });
