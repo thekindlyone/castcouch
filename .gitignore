@@ -2,3 +2,4 @@ node_modules/
 harness/media/
 *.png
 capture*.json
+__pycache__/

@@ -2,17 +2,34 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { firefox } from 'playwright';
 import { start, harnessScript } from '../harness/server.mjs';
+import { spawn } from 'node:child_process';
+import readline from 'node:readline';
 
 const SITE = 'http://localhost:8011/', P = '127.0.0.1:8012';
-let stop, browser;
-before(async () => { stop = start({ sitePort: 8011, playerPort: 8012 }); browser = await firefox.launch(); });
-after(async () => { await browser?.close(); await stop?.(); });
+let stop, browser, tv, service;
+const SERVICE = 8013, tvEvents = [];
+before(async () => {
+  stop = start({ sitePort: 8011, playerPort: 8012 }); browser = await firefox.launch();
+  // The real home service and the fake TV (both Python).
+  tv = spawn('python3', ['test/fake_tv.py']);
+  const lines = readline.createInterface({ input: tv.stdout });
+  const port = await new Promise(ok => lines.once('line', l => ok(JSON.parse(l).port)));
+  lines.on('line', l => tvEvents.push(JSON.parse(l)));
+  service = spawn('python3', ['home/castcouch_home.py', '--bind', '127.0.0.1', '--port', String(SERVICE), '--tv', '127.0.0.1:' + port, '--log', '/tmp/castcouch-test-home.log']);
+  for (let i = 0; i < 50; i++) { try { if ((await fetch(`http://127.0.0.1:${SERVICE}/ping`)).ok) break; } catch {} await new Promise(r => setTimeout(r, 100)); }
+});
+after(async () => { await browser?.close(); await stop?.(); service?.kill(); tv?.kill(); });
 
 // Stand-in for Tampermonkey: same code, in every frame, commands recorded per frame.
 async function open(query = '', path = '') {
   const ctx = await browser.newContext({ viewport: { width: 412, height: 860 } });
-  await ctx.addInitScript(`window.__cmd={};window.__clip=null;
+  await ctx.addInitScript(`window.__cmd={};window.__clip=null;window.__relay='127.0.0.1:${SERVICE}';
     window.GM_registerMenuCommand=(n,f)=>{__cmd[n]=f};window.GM_setClipboard=t=>{__clip=t};
+    window.GM_getValue=(k,d)=>k==='relay'?__relay:d;window.GM_setValue=()=>{};
+    window.GM_xmlhttpRequest=d=>{const c=new AbortController(),t=setTimeout(()=>{c.abort();d.ontimeout?.()},d.timeout||30000);
+      fetch(d.url,{method:d.method,headers:d.headers,body:d.data,signal:c.signal})
+        .then(async r=>{clearTimeout(t);d.onload?.({status:r.status,responseText:await r.text()})})
+        .catch(e=>{if(!c.signal.aborted){clearTimeout(t);d.onerror?.(e)}})};
     (()=>{${harnessScript(P, 'localhost:8011')}\n})();`);
   const page = await ctx.newPage();
   await page.goto(SITE + path + '?' + query);
@@ -24,7 +41,8 @@ const PLAYER = q => `intent://${P}/embed/v1?t=v1.abc.def&${q}#Intent;scheme=http
 
 test('commands are registered in the right frames', async () => {
   const { ctx, page, frame } = await open();
-  assert.deepEqual(await page.evaluate(() => Object.keys(__cmd)), ['Open player in Chrome', 'Open player in Chrome (tap a link)']);
+  // The harness site doubles as the page-player site, so it also gets the TV commands.
+  assert.deepEqual(await page.evaluate(() => Object.keys(__cmd)), ['Open player in Chrome', 'Open player in Chrome (tap a link)', 'Play on TV (castcouch service)', 'Set castcouch service address']);
   assert.deepEqual(await frame.evaluate(() => Object.keys(__cmd)), ['[player] Copy stream URL']);
   await ctx.close();
 });
@@ -179,4 +197,62 @@ test('harness Referer mode: 403 without, 200 with', async () => {
   const u = `http://${P}/ref/v2.master.abc`;
   assert.equal((await fetch(u)).status, 403);
   assert.equal((await fetch(u, { headers: { Referer: 'http://x/' } })).status, 200);
+});
+
+const TV = 'button[popover]';
+const showTv = async page => { await page.mouse.move(150, 420); await page.locator(TV).waitFor({ timeout: 3000 }); };
+
+test('TV: plays on the TV through the home service, pauses Firefox, and the controls work', async () => {
+  const { ctx, page } = await open('', 'watch/movie/7');
+  await playing(page);
+  await page.evaluate(() => { document.querySelector('video').currentTime = 5; });
+  await showTv(page);
+  const b = await page.locator(TV).boundingBox(), c = await page.locator(BTN).boundingBox();
+  assert.ok(b.x + b.width <= c.x, 'TV sits left of Cast');
+  tvEvents.length = 0;
+  await page.locator(TV).click({ timeout: 3000 });
+  await page.locator('#stc-tv').getByText('Playing on').waitFor({ timeout: 30000 });
+  const got = tvEvents.find(e => e.fetched);
+  assert.ok(got, 'the TV fetched the relayed stream');
+  assert.equal(got.ts_at_0, true);
+  assert.equal(got.title, 'Watch');
+  assert.ok(got.position >= 4, 'starts where Firefox was: ' + got.position);
+  assert.equal(await page.evaluate(() => document.querySelector('video').paused), true);
+  await page.locator('#stc-tv').getByRole('button', { name: 'Pause' }).click();
+  await page.locator('#stc-tv').getByText(/paused at/).waitFor({ timeout: 5000 });
+  await page.locator('#stc-tv').getByRole('button', { name: 'Stop' }).click();
+  await page.locator('#stc-tv').getByText('Stopped.').waitFor({ timeout: 5000 });
+  assert.equal(await page.locator('#stc-tv a').getAttribute('href'), `http://127.0.0.1:${SERVICE}/`);
+  await ctx.close();
+});
+
+test('TV: service not running → says so, offers Chrome, leaves Firefox playing', async () => {
+  const { ctx, page } = await open('', 'watch/movie/7');
+  await playing(page);
+  await page.evaluate(() => { window.__relay = '127.0.0.1:1'; });
+  await showTv(page);
+  await page.locator(TV).click();
+  await page.locator('#stc-tv').getByText("Can't reach the castcouch service at 127.0.0.1:1").waitFor({ timeout: 10000 });
+  assert.equal(await page.locator('#stc-tv a').getAttribute('href'), 'intent://localhost:8011/watch/movie/7#Intent;scheme=http;package=com.android.chrome;end');
+  assert.equal(await page.evaluate(() => document.querySelector('video').paused), false);
+  await ctx.close();
+});
+
+test('TV: a server that refuses outsiders → advice to switch to Polaris, nothing sent to the TV', async () => {
+  const { ctx, page } = await open('ref=1', 'watch/movie/8');
+  await page.waitForTimeout(1500);
+  tvEvents.length = 0;
+  const r = await page.evaluate(() => __cmd['Play on TV (castcouch service)']());
+  assert.equal(r.code, 'stream-refused');
+  await page.locator('#stc-tv').getByText('Switch the player to Polaris').waitFor({ timeout: 3000 });
+  assert.equal(tvEvents.some(e => e.type === 'LOAD'), false);
+  await ctx.close();
+});
+
+test('TV: before any video has loaded → asks to start the film first', async () => {
+  const { ctx, page } = await open('nostream=1', 'watch/movie/9');
+  const r = await page.evaluate(() => __cmd['Play on TV (castcouch service)']());
+  assert.equal(r.code, 'no-stream');
+  await page.locator('#stc-tv').getByText('Start the film, then tap TV again').waitFor({ timeout: 3000 });
+  await ctx.close();
 });

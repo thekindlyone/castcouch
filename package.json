@@ -2,7 +2,7 @@
   "name": "castcouch",
   "version": "1.0.0",
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test test/*.test.mjs && python3 -m unittest discover -s test -p 'test_home.py'",
     "harness": "node harness/server.mjs"
   },
   "license": "ISC",

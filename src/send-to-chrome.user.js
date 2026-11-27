@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Send to Chrome
 // @namespace    https://github.com/thekindlyone/castcouch
-// @version      4.2.0
-// @description  Opens the video player in Chrome for Android, where it can be cast. Adds a Cast button to the page.
+// @version      4.3.0
+// @description  Opens the video player in Chrome for Android, where it can be cast. Adds a Cast button to the page, and on cinejoy a TV button that plays through the castcouch home service.
 // @match        *://anipm.pk/*
 // @match        *://*.anipm.pk/*
 // @match        *://ani.pm/*
@@ -18,6 +18,11 @@
 // @run-at       document-start
 // @grant        GM_registerMenuCommand
 // @grant        GM_setClipboard
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @connect      192.168.88.8
+// @connect      *
 // @homepageURL  https://github.com/thekindlyone/castcouch
 // @downloadURL  https://raw.githubusercontent.com/thekindlyone/castcouch/main/src/send-to-chrome.user.js
 // @updateURL    https://raw.githubusercontent.com/thekindlyone/castcouch/main/src/send-to-chrome.user.js
@@ -112,7 +117,7 @@ function listenForPause() {
 
 // A plain link, so the launch comes from a real tap. It is a popover: shown in the top layer (above any
 // z-index) and kept outside <body> except in fullscreen, so the site does not re-render it.
-let button = null;
+let button = null, tvButton = null;
 let lastTouch = 0;
 function makeButton() {
   const b = document.createElement('a');
@@ -138,11 +143,23 @@ function coversFrame(frame) {
   return document.elementFromPoint((b.left + b.right) / 2, (b.top + b.bottom) / 2) === frame;
 }
 
+function makeTvButton() {
+  const b = document.createElement('button');
+  b.textContent = 'TV';
+  b.title = 'Play on the TV through the castcouch service on the PC';
+  b.setAttribute('popover', 'manual');
+  b.style.cssText = button.style.cssText.replace('#1a73e8', '#188038');
+  // Its taps are its own: a site that toggles play on any tap must not see them.
+  for (const t of ['click', 'pointerdown', 'pointerup']) b.addEventListener(t, e => e.stopPropagation());
+  b.addEventListener('click', playOnTv);
+  return b;
+}
+
 function updateButton() {
   const pageUrl = pagePlayerUrl(location.href);
   const frame = pageUrl ? null : findPlayerFrame();
   const url = pageUrl ?? frame?.src;
-  if (!url || (pageUrl && !pageButtonVisible())) { button?.remove(); return; }
+  if (!url || (pageUrl && !pageButtonVisible())) { button?.remove(); tvButton?.remove(); return; }
   button ??= makeButton();
   button.style.left = pageUrl ? 'auto' : '124px'; // framed: gap between the logo and the header icons
   button.style.right = pageUrl ? '16px' : 'auto';
@@ -154,21 +171,35 @@ function updateButton() {
   if (button.parentNode !== home) home.append(button);
   if (button.showPopover && !button.matches(':popover-open')) button.showPopover();
   button.style.visibility = 'visible';
+  if (pageUrl) {
+    tvButton ??= makeTvButton();
+    tvButton.style.left = 'auto';
+    tvButton.style.right = '81px'; // left of Cast
+    if (tvButton.parentNode !== home) home.append(tvButton);
+    if (tvButton.showPopover && !tvButton.matches(':popover-open')) tvButton.showPopover();
+  }
   if (frame) button.style.visibility = coversFrame(frame) ? 'hidden' : 'visible';
 }
 
 // Modal <dialog>s are drawn in the top layer, above any z-index the site or an ad uses.
-function showPanel(url) {
-  document.getElementById('stc-panel')?.remove();
+function dialog(id) {
+  document.getElementById(id)?.remove();
   const d = document.createElement('dialog');
-  d.id = 'stc-panel';
+  d.id = id;
   d.style.cssText = 'position:fixed;margin:auto;max-width:90vw;padding:20px;border:0;border-radius:12px;background:#fff;color:#111;font:16px sans-serif';
-  const row = (tag, text, props) => {
+  const row = (tag, text, props, parent = d) => {
     const e = Object.assign(document.createElement(tag), props);
     e.textContent = text;
     e.style.cssText = 'display:block;box-sizing:border-box;width:100%;margin:8px 0;padding:14px;border:0;border-radius:8px;background:#1a73e8;color:#fff;text-align:center;text-decoration:none;font:16px sans-serif';
-    d.append(e);
+    parent.append(e);
+    return e;
   };
+  const show = () => { (document.body || document.documentElement).append(d); if (!d.open) d.showModal(); };
+  return { d, row, show };
+}
+
+function showPanel(url) {
+  const { d, row, show } = dialog('stc-panel');
   if (url) {
     row('a', 'Open player in Chrome', { href: toChromeIntent(url), onclick: pausePlayer });
     row('button', 'Copy player link', { onclick: () => GM_setClipboard(url) });
@@ -176,8 +207,83 @@ function showPanel(url) {
     d.append('No player found. Start an episode first.');
   }
   row('button', 'Close', { onclick: () => d.remove() });
-  (document.body || document.documentElement).append(d);
-  d.showModal();
+  show();
+}
+
+// ---- TV: play through the castcouch home service on the PC (home/castcouch_home.py) ----
+
+const RELAY_DEFAULT = '192.168.88.8:8899';
+const relayAddress = () => (typeof GM_getValue === 'function' && GM_getValue('relay', '')) || RELAY_DEFAULT;
+
+// The newest playlist the page's player requested: the server it is playing from now.
+function currentStream(entries) {
+  const c = entries.filter(e => isStreamUrl(e.name) && /^(fetch|xmlhttprequest)$/.test(e.initiatorType));
+  return c.length ? c[c.length - 1].name : null;
+}
+
+// Always resolves, to the service's reply or to an {ok:false} that says what went wrong.
+function relayCall(path, body, timeout = 10000) {
+  const addr = relayAddress();
+  const down = `Can't reach the castcouch service at ${addr}. Is the PC on, and are the PC and this phone on the home Wi-Fi?`;
+  return new Promise(resolve => GM_xmlhttpRequest({
+    method: body ? 'POST' : 'GET', url: `http://${addr}${path}`, timeout,
+    headers: { 'Content-Type': 'application/json' }, data: body ? JSON.stringify(body) : undefined,
+    onload: r => {
+      try { resolve(JSON.parse(r.responseText)); }
+      catch { resolve({ ok: false, code: 'bad-reply', message: `Something at ${addr} answered, but not the castcouch service (HTTP ${r.status}).` }); }
+    },
+    onerror: () => resolve({ ok: false, code: 'relay-unreachable', message: down }),
+    ontimeout: () => resolve({ ok: false, code: 'relay-timeout', message: down + ' (no answer in time)' }),
+  }));
+}
+
+const TV_ADVICE = {
+  'stream-refused': 'This server only plays inside cinejoy. Switch the player to Polaris (Servers), or put Polaris first in Settings → Playback → Server Order.',
+  'stream-unsupported': 'Switch the player to Polaris (Servers) and try again.',
+  'stream-unreachable': 'Try again, or switch the player to Polaris.',
+};
+const clock = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s % 60).padStart(2, '0'); };
+
+function tvPanel(r) {
+  const { d, row, show } = dialog('stc-tv');
+  const line = text => { const p = document.createElement('p'); p.style.margin = '4px 0 12px'; p.textContent = text; d.append(p); return p; };
+  if (r.busy) {
+    line(r.message);
+  } else if (r.ok) {
+    const st = line(`Playing on ${r.tv || 'the TV'}: ${r.title || 'video'}`);
+    const act = (label, action, seconds) => row('button', label, {
+      onclick: async () => { const x = await relayCall('/control', { action, seconds }); st.textContent = x.ok ? (x.playing ? `${x.state.toLowerCase()} at ${clock(x.position)} on ${x.tv}` : 'Stopped.') : x.message; },
+    });
+    act('Pause', 'pause'); act('Resume', 'play'); act('Back 30 s', 'seek', -30); act('Forward 30 s', 'seek', 30); act('Stop', 'stop');
+    row('a', 'Remote control page', { href: `http://${relayAddress()}/`, target: '_blank' });
+  } else {
+    line(r.message);
+    if (TV_ADVICE[r.code]) line(TV_ADVICE[r.code]);
+    row('button', 'Try again', { onclick: playOnTv });
+    const page = pagePlayerUrl(location.href);
+    if (page) row('a', 'Open in Chrome instead', { href: toChromeIntent(page), onclick: pausePlayer });
+  }
+  if (!r.busy) row('button', 'Close', { onclick: () => d.remove() });
+  show();
+}
+
+async function playOnTv() {
+  const stream = currentStream(performance.getEntriesByType('resource'));
+  if (!stream) { const r = { ok: false, code: 'no-stream', message: 'No video stream found yet. Start the film, then tap TV again.' }; tvPanel(r); return r; }
+  tvPanel({ busy: true, message: 'Sending to the TV…' });
+  const v = document.querySelector('video');
+  const r = await relayCall('/play', {
+    stream, page: location.href, position: v?.currentTime || 0,
+    title: document.title.replace(/\s*[-|–]\s*cinejoy\s*$/i, ''),
+  }, 60000);
+  if (r.ok) pauseHere();
+  tvPanel(r);
+  return r;
+}
+
+function setRelay() {
+  const a = prompt('Address of the PC running the castcouch service (IP:port)', relayAddress());
+  if (a != null) GM_setValue('relay', a.trim());
 }
 
 function openInChrome() {
@@ -202,6 +308,10 @@ function main() {
   } else if (window.top === window) {
     GM_registerMenuCommand('Open player in Chrome', openInChrome);
     GM_registerMenuCommand('Open player in Chrome (tap a link)', () => { const u = findPlayer(); showPanel(u); return u; });
+    if (PAGE_PLAYER_HOSTS.includes(location.host)) {
+      GM_registerMenuCommand('Play on TV (castcouch service)', playOnTv);
+      GM_registerMenuCommand('Set castcouch service address', setRelay);
+    }
     watchHold();
     for (const t of ['pointerdown', 'pointermove', 'keydown']) {
       document.addEventListener(t, () => {

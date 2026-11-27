@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const code = fs.readFileSync(new URL('../src/send-to-chrome.user.js', import.meta.url), 'utf8');
-const s = vm.runInNewContext(code + '\n;({pagePlayerUrl,isPlayerUrl,pickPlayer,isStreamUrl,pickStream,toChromeIntent,toVlcIntent})', { URL, TypeError });
+const s = vm.runInNewContext(code + '\n;({pagePlayerUrl,isPlayerUrl,pickPlayer,isStreamUrl,pickStream,currentStream,toChromeIntent,toVlcIntent})', { URL, TypeError });
 const M = 'https://media.settlar.io/v1/object/';
 
 test('isStreamUrl', () => {
@@ -40,4 +40,11 @@ test('pagePlayerUrl', () => {
   assert.equal(s.pagePlayerUrl('https://cinejoy.pk/watch/tv/1399/1/1?x=1#t'), 'https://cinejoy.pk/watch/tv/1399/1/1?x=1');
   for (const u of ['https://cinejoy.pk/movie/423', 'https://cinejoy.pk/watch/', 'https://cinejoy.pk.evil.example/watch/movie/1', 'https://anipm.pk/watch/x'])
     assert.equal(s.pagePlayerUrl(u), null, u);
+});
+
+test('currentStream takes the newest script-requested playlist (the server now playing)', () => {
+  const e = (name, initiatorType) => ({ name, initiatorType });
+  const old = 'https://lightspeed.st/hls/a/master.m3u8', now = 'https://erebus.cursed.st/p/b.m3u8?e=1';
+  assert.equal(s.currentStream([e(old, 'xmlhttprequest'), e('https://lightspeed.st/x.png', 'xmlhttprequest'), e(now, 'fetch'), e('https://erebus.cursed.st/s1.ts', 'xmlhttprequest'), e('https://a.b/sub.m3u8', 'track')]), now);
+  assert.equal(s.currentStream([e('blob:https://cinejoy.pk/1', 'video')]), null);
 });

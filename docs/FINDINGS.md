@@ -99,3 +99,30 @@ The receiver (Google default, `CC1AD845`) runs on another origin, so each server
 - That relay was a plain Node client with no added headers; playlist and segments answered 200. So a home relay for Polaris looks feasible without disguising anything. Not tested against the TV.
 - The TV (65PUT7908/79) is a Google TV model according to Philips' product page title; its browser options were not tested.
 - The choice resets on reload, but cinejoy has Settings → Playback → Server Order (stored per browser).
+
+## Home relay test on the real TV (2026-11-28)
+
+- Setup (prototype, since replaced by `home/castcouch_home.py`): a Node relay in WSL (plain client, no added headers; rewrote the playlist to its own segment names and dropped the 64-byte PNG header), a Python forwarder on Windows (Wi-Fi port → WSL), and a minimal CASTV2 sender (default receiver `CC1AD845`, `application/x-mpegurl`, TS segments).
+- Windows network profile had to be Private (the existing python.exe allow rule is Private only). The phone reached the relay over Wi-Fi.
+- cinejoy Polaris, Shang-Chi, 1080p H.264 Main / AAC: **the TV played it**: `BUFFERING → PLAYING`, position counting to 36 s, 8 requests from `CrKey/1.56.5 DeviceType/AndroidTV`, all 200. **Confirmed by the user: picture and sound on the TV.**
+- Polaris stream links expire: one 2 days old returned 403. Each play needs a fresh link.
+- lightflix not tried through the relay.
+
+## Home service and TV button (2026-11-28, service 1.0.0, script 4.3.0)
+
+- `home/castcouch_home.py` runs on Windows (Python 3.9). Windows Python's default `Python-urllib` name gets Cloudflare
+  `error code: 1010` (403) from Polaris; its own name `castcouch-relay/1.0` gets 200. No other headers are sent.
+- The phone supplies the stream URL (the newest playlist the page requested); a link obtained in Firefox played from
+  the PC, so the link is not tied to the browser that fetched it.
+- Bugs found by the fake-TV tests, all in the Cast connection: reading and writing one TLS socket from two threads
+  corrupts it ("bad record mac"); TLS housekeeping makes the socket look readable with no message, which had stalled
+  every first connection by 10 s; an empty MEDIA_STATUS after Stop must clear the state; a TV that goes silent without
+  closing is now detected (status probe before each play; 20 s without heartbeat answers).
+- Windows quirk: tools started from the Claude desktop app had writes to `AppData\Local` redirected to a private copy,
+  invisible to Task Scheduler (task error 0x8007010B). The service therefore lives in `%USERPROFILE%\castcouch`.
+- Recovery, tested on the PC: service killed → back in ~6 s; supervisor killed → service keeps running and a new
+  supervisor (task restart, or the 5-minute trigger) adopts it; adopted service killed → back in ~10 s.
+- End to end on the real site, Firefox (Playwright, headed) with the real script, real service, fake TV: default server
+  → "refused (HTTP 404)" with Polaris advice and nothing sent to the TV; Polaris → TV loaded the relayed 1080p stream at
+  Firefox's position, Firefox paused, ±30 s worked, no pop-ups. Not yet tried from the phone on the real TV.
+- The PC never sleeps on mains power. It does not sign in automatically, so after a reboot the service starts at sign-in.

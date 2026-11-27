@@ -19,3 +19,15 @@ If 8 fails on the TV but 7 works: Android's own screen cast (Quick Settings → 
 1. Start a film or episode. The Cast button is top right when paused or just after a touch, and goes away while watching.
 2. Tap it: Firefox pauses, Chrome opens the same title. In Chrome, tap the player and use its own Cast icon.
 3. Does it play on the TV for more than a minute? Any pop-ups in Chrome?
+
+## cinejoy → TV through the PC (v4.3.0)
+
+1. Tampermonkey updates the script to 4.3.0 (or: Tampermonkey → Utilities → Check for updates).
+2. Phone on the home Wi-Fi. Open `http://192.168.88.8:8899/ping` once: it should say `"service": "castcouch"`.
+3. Start a film, open Servers, pick **Polaris**, let it play a few seconds.
+4. Tap the green **TV** button (top right, left of Cast). Allow Tampermonkey's connection prompt ("Always allow").
+5. Expect: Firefox pauses, the panel says "Playing on 65PUT7908/79", the TV plays from the same point.
+6. Try Pause, Forward 30 s, Stop in the panel. Try `http://192.168.88.8:8899/` as a remote.
+7. On another server (e.g. the default one): the panel should explain and suggest Polaris; the TV is left alone.
+8. Turn the phone's Wi-Fi off and tap TV: the panel should say it can't reach the service and offer Chrome.
+9. Does the film play to the end? (Polaris links may expire; how long they last is not known.)
