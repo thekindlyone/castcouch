@@ -188,3 +188,25 @@ The receiver (Google default, `CC1AD845`) runs on another origin, so each server
   Whether the real TV plays MKV, HEVC and AC3 through Google's default receiver is not yet known.
 - OpenSubtitles: official REST API with the user's own key (`Api-Key`, `User-Agent: castcouch v…`), search by
   `moviehash` then `query`+`year`, `POST /download` → link. Tested against a fake server only; no key available here.
+
+## Converting old files (WSL ffmpeg 4.4, RTX 3070 NVENC, 2026-11-28)
+
+- WSL can do it: `h264_nvenc` works (720p test at ~17× real time) and every film folder is readable. Reads over the
+  WSL file bridge ran ~35 MB/s against ~70 MB/s from Windows on D:. Scripts: `tools/convert/` (scan, classify,
+  convert, verify, align).
+- Scan of all 309 films (ffprobe, 1.5 min): 230 fine; 42 sound fix (AC3/E-AC3/DTS); 26 video re-encode (21 MPEG-4 ASP
+  AVI, 4 MS-MPEG4v3 AVI, 1 AV1 MP4); 7 HEVC left alone; 3 HEVC + sound fix; 1 AVI holding H.264 (container only).
+  79 films carry embedded SubRip subtitles.
+- 18 of the 72 films needing work, and `D:\Movies` itself, are read-only to the current account: their folders are
+  owned by an account from an older Windows install (`…-1001`, not the current user's SID). Windows programs would be
+  refused too. Not changed; test outputs for those went to `E:\Movies\castcouch-converted\`.
+- One of each, originals untouched:
+  - Video (12 Angry Men, MS-MPEG4v3 + MP3 AVI → H.264 NVENC CQ21 + AAC MP4): 247 s, 0.7 → 1.0 GB. Duration and frame
+    count identical (138,292), no decode errors. SSIM 0.98–0.99 at five points once aligned (two first read 0.92:
+    AVI seeking lands one frame off; confirmed by shifting). Sound: 0 ms offset, correlation 1.000.
+  - Sound (John Dies at the End, MKV H.264 + AC3 5.1 eng/spa → MP4: AAC stereo first/default, both AC3 kept): 151 s.
+    Durations and frames identical; 48/48 decoded frames bit-identical at five points; AAC vs original: 0 ms offset,
+    correlation 0.989–1.000.
+  - Container (Shawshank, H.264 + MP3 in AVI → MP4, all copied): 54 s. Frames identical (204,857); at every point the
+    48 decoded frames match the original bit for bit (one frame apart, the AVI seek again); sound identical.
+- Not yet played on the TV.
