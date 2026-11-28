@@ -265,6 +265,31 @@ test('TV: a film without Polaris → tries Polaris, then switches to Nebula and 
   await ctx.close();
 });
 
+test('TV: after moving to another film on the same page, the previous film is never sent', async () => {
+  const { ctx, page } = await open('noswitch=1&sub=1', 'watch/movie/8');
+  await playing(page);
+  assert.equal((await page.evaluate(() => __cmd['Play on TV (castcouch service)']())).ok, true, 'first film plays');
+  await page.evaluate(() => __cmd['Play on TV (castcouch service)']); // (controls panel open; close it below)
+  // cinejoy-style move: new address without a page load, then the player loads a stream that refuses the PC.
+  await page.evaluate(() => {
+    document.querySelectorAll('#stc-tv').forEach(d => d.remove());
+    history.pushState({}, '', '/watch/movie/9');
+  });
+  await page.waitForTimeout(500);
+  await page.evaluate(() => {
+    const old = performance.getEntriesByType('resource').map(e => e.name).find(n => /v2\.master/.test(n));
+    h.loadSource(new URL(old).origin + '/ref/master.m3u8');
+  });
+  await page.waitForFunction(() => performance.getEntriesByType('resource').some(e => /\/ref\/master/.test(e.name)), null, { timeout: 10000 });
+  await page.waitForTimeout(1000);
+  tvEvents.length = 0;
+  const r = await page.evaluate(() => __cmd['Play on TV (castcouch service)']());
+  assert.equal(r.ok, false, 'the first film\'s stream must not be played for the second: ' + JSON.stringify(r));
+  assert.equal(r.code, 'switch-failed');
+  assert.equal(tvEvents.some(e => e.type === 'LOAD'), false, 'nothing sent to the TV');
+  await ctx.close();
+});
+
 test('TV: refused and no way to switch → explains how to pick Polaris, nothing sent to the TV', async () => {
   const { ctx, page } = await open('ref=1&noswitch=1', 'watch/movie/8');
   await playing(page);

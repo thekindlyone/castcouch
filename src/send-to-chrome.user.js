@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Send to Chrome
 // @namespace    https://github.com/thekindlyone/castcouch
-// @version      4.7.0
+// @version      4.7.1
 // @description  anipm: opens the player in Chrome for Android, where it can be cast (Cast button). cinejoy: plays on the TV through the castcouch service on the home PC (castcouch button).
 // @match        *://anipm.pk/*
 // @match        *://*.anipm.pk/*
@@ -233,10 +233,23 @@ const currentStream = entries => recentStreams(entries)[0] ?? null;
 let lastSubtitle = null; // the subtitle file the player last loaded: the one picked in its Subtitles menu
 let subtitleList = null, subtitleVotes = null; // the lists the page loads, reused to choose English ourselves
 const seen = [], traffic = new Map(); // traffic: "host type .ext" -> count, for diagnostics (no paths or tokens)
+// cinejoy moves from film to film without loading a new page, so what was seen belongs to the film it was seen on:
+// on a new address, forget the old film's streams and subtitles (or the TV gets the previous film).
+let filmPath = globalThis.location?.pathname, filmSince = 0;
+function checkFilm() {
+  if (location.pathname === filmPath) return;
+  filmPath = location.pathname;
+  filmSince = performance.now();
+  seen.length = 0;
+  lastSubtitle = subtitleList = subtitleVotes = null;
+}
 function watchStreams() {
   try {
+    setInterval(checkFilm, 200); // notice the move before the new film's requests start
     new PerformanceObserver(list => {
+      checkFilm();
       for (const e of list.getEntries()) {
+        if (e.startTime < filmSince) continue; // the previous film's, arriving late
         if (isStreamUrl(e.name)) seen.push({ name: e.name, initiatorType: e.initiatorType });
         if (isSubtitleUrl(e.name)) lastSubtitle = e.name;
         else if (/\/subtitles\?/.test(e.name)) subtitleList = e.name; // the page's list of every subtitle file
@@ -284,6 +297,7 @@ const getJson = async url => { try { const r = await fetch(url, { signal: AbortS
 
 // The subtitles to send: the ones picked in the player, else (if allowed) the best English file. Null for none.
 async function pickedSubtitles(auto = true) {
+  checkFilm();
   let url = lastSubtitle, label = null;
   if (!url && auto && autoEnglish() && subtitleList) {
     const best = bestEnglish(await getJson(subtitleList), subtitleVotes && await getJson(subtitleVotes));
@@ -298,14 +312,17 @@ async function pickedSubtitles(auto = true) {
   } catch { return null; }
 }
 
-const streamEntries = () => (seen.length ? seen : performance.getEntriesByType('resource'));
+const streamEntries = () => {
+  checkFilm();
+  return seen.length ? seen : performance.getEntriesByType('resource').filter(e => e.startTime >= filmSince);
+};
 const streamsNow = () => recentStreams(streamEntries(), 5, document.querySelector('video')?.currentSrc);
 
 // What the page loaded, without addresses: sent along so the PC's log can show why a stream was not found.
 function diagnostics() {
   const v = document.querySelector('video'), src = parse(v?.currentSrc || '');
   return {
-    script: '4.6.0', ua: navigator.userAgent.slice(0, 160),
+    script: '4.7.1', ua: navigator.userAgent.slice(0, 160),
     video: src ? `${src.protocol}//${src.host}${/\.m3u8$/i.test(src.pathname) ? ' (.m3u8)' : ''}` : 'none',
     traffic: [...traffic].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} x${n}`).slice(0, 40),
   };

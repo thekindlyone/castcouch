@@ -222,3 +222,7 @@ The receiver (Google default, `CC1AD845`) runs on another origin, so each server
   on the real TV.**
 - The phone button now tries Polaris, then Nebula, when the current server is refused (closing the menu if a server
   isn't offered).
+- 4.7.0 bug, seen on the phone: after Doctor Strange (Polaris), moving to Everything Everywhere (Light only, no page
+  load) played Doctor Strange again: the newest four addresses (Light) were refused and the service fell back to the
+  fifth, the previous film's Polaris stream. 4.7.1 forgets streams and subtitles when the page address changes; a
+  browser test reproduces the bug with 4.7.0 and passes with 4.7.1.
