@@ -33,7 +33,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = '1.4.1'
+VERSION = '1.5.0'
 UA = 'castcouch-relay/' + VERSION  # an honest name of our own; some CDNs refuse Python's default one
 RECEIVER = 'CC1AD845'  # Google's Default Media Receiver
 NS = 'urn:x-cast:com.google.cast.'
