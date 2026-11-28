@@ -88,23 +88,43 @@ def choose_variant(text, base):
 
 
 def rewrite(text, base):
-    """(playlist with segments renamed 0.ts, 1.ts, ..., [absolute segment URLs])."""
-    for tag in ('#EXT-X-MAP', '#EXT-X-BYTERANGE'):
-        if tag in text:
-            raise Failure('stream-unsupported', 'This stream format (%s) is not supported; try another server.' % tag[7:])
+    """(playlist with pieces renamed 0.ts, 1.ts, ... (or init.mp4 + 0.m4s, ... for fMP4), [absolute piece URLs],
+    absolute init URL or None)."""
+    if '#EXT-X-BYTERANGE' in text:
+        raise Failure('stream-unsupported', 'This stream format (BYTERANGE) is not supported; try another server.')
     for m in re.finditer(r'#EXT-X-KEY:([^\n]*)', text):
         if 'METHOD=NONE' not in m.group(1):
             raise Failure('stream-unsupported', 'This stream is encrypted; try another server.')
+    maps = re.findall(r'#EXT-X-MAP:[^\n]*URI="([^"]+)"', text)
+    if len(set(maps)) > 1 or ('#EXT-X-MAP' in text and not maps) or (maps and 'BYTERANGE' in text):
+        raise Failure('stream-unsupported', 'This stream format (several MAPs) is not supported; try another server.')
+    init = urllib.parse.urljoin(base, maps[0]) if maps else None
+    ext = 'm4s' if init else 'ts'
     segs, out = [], []
     for line in text.splitlines():
         if line.strip() and not line.startswith('#'):
-            out.append('%d.ts' % len(segs))
+            out.append('%d.%s' % (len(segs), ext))
             segs.append(urllib.parse.urljoin(base, line.strip()))
+        elif line.startswith('#EXT-X-MAP'):
+            out.append('#EXT-X-MAP:URI="init.mp4"')
         else:
             out.append(line)
     if not segs:
         raise Failure('stream-unsupported', 'The playlist lists no video.')
-    return '\n'.join(out) + '\n', segs
+    return '\n'.join(out) + '\n', segs, init
+
+
+def is_fmp4_piece(b):
+    """A fragmented-MP4 media piece: boxes such as styp/sidx before a moof, near the start."""
+    i = 0
+    while i + 8 <= min(len(b), 65536):
+        size, kind = struct.unpack('>I', b[i:i + 4])[0], b[i + 4:i + 8]
+        if kind == b'moof':
+            return True
+        if kind not in (b'styp', b'sidx', b'prft', b'emsg', b'free') or size < 8:
+            return False
+        i += size
+    return False
 
 
 def ts_offset(b):
@@ -129,7 +149,7 @@ def to_vtt(text):
 
 
 def prepare(stream):
-    """Fetch and check a stream; returns (playlist, segment URLs)."""
+    """Fetch and check a stream; returns (playlist, piece URLs, 'ts' or 'fmp4', init piece URL or None)."""
     u = urllib.parse.urlparse(stream or '')
     if u.scheme not in ('http', 'https') or not u.netloc:
         raise Failure('bad-request', 'No usable stream address was sent.', 400)
@@ -139,10 +159,17 @@ def prepare(stream):
     variant = choose_variant(text, stream)
     if variant:
         stream, text = variant, fetch(variant).decode('utf-8', 'replace')
-    playlist, segs = rewrite(text, stream)
+    playlist, segs, init = rewrite(text, stream)
+    if init:  # fMP4 (Nebula): the TV's player takes it as is, given the init piece
+        head = fetch(init, timeout=30)
+        if b'ftyp' not in head[:64] or b'moov' not in head:
+            raise Failure('stream-unsupported', 'The video from this server has no usable start piece; try another server.')
+        if not is_fmp4_piece(fetch(segs[0], timeout=30)):
+            raise Failure('stream-unsupported', 'This server sends video the TV relay cannot pass on; try another server.')
+        return playlist, segs, 'fmp4', init
     if ts_offset(fetch(segs[0], timeout=30)) is None:
         raise Failure('stream-unsupported', 'This server sends video the TV relay cannot pass on (not MPEG-TS); try Polaris.')
-    return playlist, segs
+    return playlist, segs, 'ts', None
 
 
 # ---------------------------------------------------------------- Cast (CASTV2)
@@ -354,12 +381,13 @@ class Cast:
             self.transport = tid
             self.send(tid, 'tp.connection', {'type': 'CONNECT'})
 
-    def load(self, url, title, position, subtitles=None, content_type='application/x-mpegurl'):
+    def load(self, url, title, position, subtitles=None, content_type='application/x-mpegurl', hls='ts'):
         """subtitles: (vtt url, name) or None. Shown from the start when given."""
         media = {'contentId': url, 'contentType': content_type, 'streamType': 'BUFFERED',
                  'metadata': {'metadataType': 0, 'title': title or 'castcouch'}}
         if content_type == 'application/x-mpegurl':
-            media.update(hlsSegmentFormat='ts', hlsVideoSegmentFormat='mpeg2_ts')
+            media.update(hlsSegmentFormat='fmp4', hlsVideoSegmentFormat='fmp4') if hls == 'fmp4' else \
+                media.update(hlsSegmentFormat='ts', hlsVideoSegmentFormat='mpeg2_ts')
         payload = {'type': 'LOAD', 'autoplay': True, 'currentTime': max(0.0, float(position or 0)), 'media': media}
         if subtitles:
             media['tracks'] = [{'trackId': 1, 'type': 'TEXT', 'subtype': 'SUBTITLES', 'trackContentId': subtitles[0],
@@ -534,7 +562,7 @@ class Home:
             first = None
             for i, stream in enumerate(candidates):
                 try:
-                    playlist, segs = prepare(stream)
+                    playlist, segs, fmt, init = prepare(stream)
                     log.info('stream %d of %d accepted: %s', i + 1, len(candidates), host(stream or ''))
                     break
                 except Failure as f:
@@ -549,15 +577,16 @@ class Home:
             vtt = to_vtt(sub.get('text')) if isinstance(sub, dict) and sub.get('text') else None
             cast = self.connection()
             sid = secrets.token_hex(6)
-            self.session = {'id': sid, 'playlist': playlist, 'segs': segs, 'title': str(body.get('title') or '')[:200],
+            self.session = {'id': sid, 'playlist': playlist, 'segs': segs, 'fmt': fmt, 'init': init,
+                            'title': str(body.get('title') or '')[:200],
                             'page': str(body.get('page') or '')[:500], 'vtt': vtt, 'vtt_n': 0,
                             'vtt_name': str((sub or {}).get('label') or '')[:200] if vtt else None}
             self.base = 'http://%s:%d/s/%s/' % (self.lan_address(cast.host), self.port, sid)
             self.session.update(media_url=self.base + 'p.m3u8', ctype='application/x-mpegurl')
             cast.launch()
-            media = cast.load(self.session['media_url'], self.session['title'], body.get('position') or 0, self.sub_track())
+            media = cast.load(self.session['media_url'], self.session['title'], body.get('position') or 0, self.sub_track(), hls=fmt)
             self.save_state()
-            log.info('playing %r (%d segments%s) on %s', self.session['title'], len(segs), ', subtitles' if vtt else '', self.tv[2])
+            log.info('playing %r (%d %s segments%s) on %s', self.session['title'], len(segs), fmt, ', subtitles' if vtt else '', self.tv[2])
             return dict(self.describe(media), title=self.session['title'])
 
     def play_local(self, body):
@@ -608,7 +637,7 @@ class Home:
             s['vtt_name'] = str((sub or {}).get('label') or '')[:200] if s['vtt'] else None
             s['vtt_n'] += 1
             position = self.cast.refresh() and self.cast.media.get('currentTime') or 0
-            media = self.cast.load(s['media_url'], s['title'], position, self.sub_track(), s['ctype'])
+            media = self.cast.load(s['media_url'], s['title'], position, self.sub_track(), s['ctype'], hls=s.get('fmt', 'ts'))
             self.save_state()
             log.info('subtitles %s for %r at %ds', 'replaced' if s['vtt'] else 'removed', s['title'], position)
             return self.describe(media)
@@ -647,6 +676,8 @@ class Home:
     def segment(self, sid, n):
         """Piece n of the playing film, from the read-ahead cache when possible; starts fetching the next ones."""
         s = self.session
+        if s and s['id'] == sid and n == -1 and s.get('init'):  # the fMP4 init piece
+            return self._piece(sid, -1, s['init'])
         if not s or s['id'] != sid or not 0 <= n < len(s['segs']):
             raise Failure('gone', 'Unknown segment.', 404)
         for k in range(n + 1, min(n + 1 + self.AHEAD, len(s['segs']))):
@@ -681,8 +712,9 @@ class Home:
             took = time.time() - t
             if took > 4:
                 log.warning('slow internet: piece %d took %.1f s (%.1f MB)', n, took, len(b) / 1e6)
-            off = ts_offset(b)
-            b = b[off:] if off else b
+            if n >= 0 and (self.session or {}).get('fmt', 'ts') == 'ts':
+                off = ts_offset(b)
+                b = b[off:] if off else b
             with self.cache_lock:
                 self.cache[key] = b
                 while len(self.cache) > 2 * self.AHEAD + 2:
@@ -1035,7 +1067,7 @@ def make_handler(home):
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 return self.reply(200, {'ok': True, 'items': home.library.listing(force='refresh' in q),
                                         'folders': home.library.roots, 'opensubtitles': bool(home.opensubtitles)})
-            m = re.fullmatch(r'/s/([0-9a-f]+)/(p\.m3u8|(\d+)\.ts|sub\d+\.vtt|video\.\w+)', path)
+            m = re.fullmatch(r'/s/([0-9a-f]+)/(p\.m3u8|(\d+)\.(?:ts|m4s)|init\.mp4|sub\d+\.vtt|video\.\w+)', path)
             if not m:
                 return self.reply(404, {'ok': False, 'code': 'not-found', 'message': 'Not found.'})
             s = home.session
@@ -1051,9 +1083,14 @@ def make_handler(home):
                 return self.reply(200, s['vtt'], 'text/vtt; charset=utf-8')
             if m.group(2) == 'p.m3u8':
                 return self.reply(200, s['playlist'], 'application/vnd.apple.mpegurl')
-            body, t = home.segment(m.group(1), int(m.group(3))), time.time()
-            self.reply(200, body, 'video/mp2t')
-            home.delivered(int(m.group(3)), time.time() - t, len(body))
+            n = -1 if m.group(2) == 'init.mp4' else int(m.group(3))
+            fmp4 = m.group(2).endswith(('.m4s', '.mp4'))
+            if fmp4 != (s.get('fmt') == 'fmp4'):
+                return self.reply(404, {'ok': False, 'code': 'not-found', 'message': 'Not found.'})
+            body, t = home.segment(m.group(1), n), time.time()
+            self.reply(200, body, 'video/mp4' if fmp4 else 'video/mp2t')
+            if n >= 0:
+                home.delivered(n, time.time() - t, len(body))
 
         def send_file(self, path, ctype):
             """The file, or the byte range the player asks for (players read a film in ranges and seek with them)."""

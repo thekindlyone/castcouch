@@ -210,3 +210,15 @@ The receiver (Google default, `CC1AD845`) runs on another origin, so each server
   - Container (Shawshank, H.264 + MP3 in AVI → MP4, all copied): 54 s. Frames identical (204,857); at every point the
     48 decoded frames match the original bit for bit (one frame apart, the AVI seek again); sound identical.
 - Not yet played on the TV.
+
+## Nebula (service 1.5, script 4.7.0)
+
+- Some films have no Polaris. cinejoy's Nebula (`nebula.bright67.online/hls/<id>/master.m3u8`) answered the relay's own
+  `castcouch-relay` name with 200 and no Referer, Origin or cookie: master and variant playlists (served as `image/jpeg`),
+  an `#EXT-X-MAP` init piece, and pieces named `.jpg`/`.png`/`.jpeg` that are plain fragmented MP4 (styp/sidx/moof, no
+  disguise header). Shang-Chi: H.264 High 1080p and AAC stereo in one track pair; 1080p and 720p variants.
+- The service now relays fMP4 HLS: `init.mp4` + `N.m4s` with `video/mp4`, and tells the TV `hlsSegmentFormat: fmp4`.
+  The real Nebula stream went through the service to the fake TV, and a relayed piece decodes cleanly. **Not yet tried
+  on the real TV.**
+- The phone button now tries Polaris, then Nebula, when the current server is refused (closing the menu if a server
+  isn't offered).

@@ -254,6 +254,17 @@ test('TV: a server that refuses outsiders → switches the player to Polaris by 
   await ctx.close();
 });
 
+test('TV: a film without Polaris → tries Polaris, then switches to Nebula and plays that', async () => {
+  const { ctx, page } = await open('ref=1&nopolaris=1', 'watch/movie/8');
+  await playing(page);
+  tvEvents.length = 0;
+  const r = await page.evaluate(() => __cmd['Play on TV (castcouch service)']());
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(tvEvents.find(e => e.fetched), 'the TV played the Nebula stream');
+  assert.match(await page.evaluate(() => performance.getEntriesByType('resource').map(e => e.name).join(' ')), /v1\/object\/v2\.master\.neb/);
+  await ctx.close();
+});
+
 test('TV: refused and no way to switch → explains how to pick Polaris, nothing sent to the TV', async () => {
   const { ctx, page } = await open('ref=1&noswitch=1', 'watch/movie/8');
   await playing(page);
@@ -261,7 +272,7 @@ test('TV: refused and no way to switch → explains how to pick Polaris, nothing
   const r = await page.evaluate(() => __cmd['Play on TV (castcouch service)']());
   assert.equal(r.code, 'switch-failed');
   await page.locator('#stc-tv').getByText(/refused the PC/).waitFor({ timeout: 3000 });
-  await page.locator('#stc-tv').getByText(/pick Polaris, then tap castcouch again/).waitFor({ timeout: 3000 });
+  await page.locator('#stc-tv').getByText(/pick Polaris or Nebula, then tap castcouch again/).waitFor({ timeout: 3000 });
   assert.equal(tvEvents.some(e => e.type === 'LOAD'), false);
   await ctx.close();
 });

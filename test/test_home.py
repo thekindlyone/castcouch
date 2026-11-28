@@ -2,6 +2,7 @@
 import json
 import os
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -20,6 +21,9 @@ from fake_tv import FakeTV  # noqa: E402
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'\0' * 56  # 64-byte disguise header, as Polaris sends
 TS = (b'\x47' + b'\x11' * 187) * 20
+box = lambda kind, body=b'': struct.pack('>I', 8 + len(body)) + kind + body
+INIT = box(b'ftyp', b'iso5\0\0\2\0iso5mp41') + box(b'moov', box(b'mvhd', b'\0' * 100))  # as Nebula sends
+PIECE = box(b'styp', b'msdh\0\0\0\0msdh') + box(b'sidx', b'\0' * 44) + box(b'moof', b'\0' * 64) + box(b'mdat', b'\x11' * 900)
 
 
 def free_port():
@@ -57,6 +61,17 @@ class Upstream:
                     self.send_response(403)
                     self.end_headers()
                     return
+                elif p == '/neb/master.m3u8':  # Nebula: fMP4 pieces with image names and types
+                    body = b'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5,RESOLUTION=1920x1080\n1080p/playlist.jpg\n'
+                elif p == '/neb/1080p/playlist.jpg':
+                    body = (b'#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:8\n#EXT-X-MAP:URI="init.mp4"\n'
+                            b'#EXTINF:7.9,\nplaylist_000.jpg\n#EXTINF:4,\nplaylist_001.png\n#EXT-X-ENDLIST\n')
+                elif p == '/neb/1080p/init.mp4':
+                    body = INIT
+                elif p.startswith('/neb/1080p/playlist_00'):
+                    body = PIECE
+                elif p == '/badneb.m3u8':
+                    body = b'#EXTM3U\n#EXT-X-MAP:URI="neb/1080p/init.mp4"\n#EXTINF:4,\njunk.bin\n'
                 elif p == '/fmp4.m3u8':
                     body = b'#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:4,\na.m4s\n'
                 elif p == '/enc.m3u8':
@@ -107,11 +122,17 @@ class Units(unittest.TestCase):
             ch.choose_variant('#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=3840x2160\n4k.m3u8\n', 'http://a/')
 
     def test_rewrite(self):
-        pl, segs = ch.rewrite('#EXTM3U\n#EXTINF:4,\nseg.png?a=1\n#EXTINF:4,\n/abs/y.ts\n#EXT-X-ENDLIST', 'https://h/p/m.m3u8?t=2')
+        pl, segs, init = ch.rewrite('#EXTM3U\n#EXTINF:4,\nseg.png?a=1\n#EXTINF:4,\n/abs/y.ts\n#EXT-X-ENDLIST', 'https://h/p/m.m3u8?t=2')
+        self.assertIsNone(init)
         self.assertEqual(pl, '#EXTM3U\n#EXTINF:4,\n0.ts\n#EXTINF:4,\n1.ts\n#EXT-X-ENDLIST\n')
         self.assertEqual(segs, ['https://h/p/seg.png?a=1', 'https://h/abs/y.ts'])
         ch.rewrite('#EXTM3U\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:4,\na.ts\n', 'http://a/')
-        for bad in ('#EXT-X-MAP:URI="i"\na.m4s', '#EXT-X-KEY:METHOD=AES-128,URI="k"\na.ts', '#EXT-X-BYTERANGE:1@0\na.ts', '#EXTM3U\n'):
+        pl, segs, init = ch.rewrite('#EXTM3U\n#EXT-X-MAP:URI="init.mp4?t=1"\n#EXTINF:4,\np_000.jpg\n', 'https://n/h/1080p/playlist.jpg')
+        self.assertEqual((pl, segs, init), ('#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:4,\n0.m4s\n', ['https://n/h/1080p/p_000.jpg'],
+                                            'https://n/h/1080p/init.mp4?t=1'))
+        self.assertTrue(ch.is_fmp4_piece(PIECE))
+        self.assertFalse(ch.is_fmp4_piece(TS) or ch.is_fmp4_piece(INIT) or ch.is_fmp4_piece(b''))
+        for bad in ('#EXT-X-MAP:URI="i"\na.m4s\n#EXT-X-MAP:URI="j"\nb.m4s', '#EXT-X-KEY:METHOD=AES-128,URI="k"\na.ts', '#EXT-X-BYTERANGE:1@0\na.ts', '#EXTM3U\n'):
             with self.assertRaises(ch.Failure) as c:
                 ch.rewrite(bad, 'http://a/')
             self.assertEqual(c.exception.code, 'stream-unsupported')
@@ -169,6 +190,19 @@ class Service(unittest.TestCase):
         self.assertFalse(call(self.port, '/control', {'action': 'stop'})[1]['playing'])
         self.assertEqual([e['type'] for e in self.tv.events if 'type' in e][:3], ['GET_STATUS', 'LAUNCH', 'LOAD'])
 
+    def test_plays_nebula_fmp4(self):
+        status, r = self.play('/neb/master.m3u8')
+        self.assertEqual((status, r['ok'], r['state']), (200, True, 'PLAYING'), r)
+        f = [e for e in self.tv.events if 'fetched' in e][0]
+        self.assertEqual((f['hls'], f['init_ok'], f['piece_ok']), (['fmp4', 'fmp4'], True, True), f)
+        self.assertEqual(f['piece_type'], 'video/mp4', 'not the image type the server claims')
+        base = f['fetched'].rsplit('/', 1)[0]
+        with self.assertRaises(urllib.error.HTTPError):  # a .ts name is not served for an fMP4 stream
+            urllib.request.urlopen(base + '/0.ts', timeout=5)
+        self.assertEqual(set(self.up.agents), {ch.UA})
+        for h in self.up.headers:
+            self.assertFalse({'Referer', 'Origin', 'Cookie'} & set(h), h)
+
     def test_second_play_reuses_player(self):
         self.play('/master.m3u8')
         self.assertTrue(self.play('/media.m3u8')[1]['ok'])
@@ -183,7 +217,7 @@ class Service(unittest.TestCase):
         self.assertEqual(c.exception.code, 404)
 
     def test_errors_explain_themselves(self):
-        cases = {'/refused.m3u8': 'stream-refused', '/fmp4.m3u8': 'stream-unsupported', '/enc.m3u8': 'stream-unsupported',
+        cases = {'/refused.m3u8': 'stream-refused', '/fmp4.m3u8': 'stream-refused', '/badneb.m3u8': 'stream-unsupported', '/enc.m3u8': 'stream-unsupported',
                  '/nots.m3u8': 'stream-unsupported', '/missing.m3u8': 'stream-refused'}
         for path, code in cases.items():
             status, r = self.play(path)

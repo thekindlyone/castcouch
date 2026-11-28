@@ -6,6 +6,7 @@ when run as a script: python fake_tv.py [port] [--fail-load]).
 """
 import json
 import os
+import re
 import socket
 import ssl
 import struct
@@ -17,7 +18,7 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'home'))
-from castcouch_home import NS, decode, encode  # noqa: E402
+from castcouch_home import NS, decode, encode, is_fmp4_piece  # noqa: E402
 
 
 def make_cert(d):
@@ -135,8 +136,17 @@ class FakeTV:
                         else:
                             pl = urllib.request.urlopen(url, timeout=10).read().decode()
                             first = [l for l in pl.splitlines() if l and not l.startswith('#')][0]
-                            seg = urllib.request.urlopen(urllib.parse.urljoin(url, first), timeout=10).read()
-                            ok = seg[:1] == b'\x47' and not self.fail_load
+                            fr = urllib.request.urlopen(urllib.parse.urljoin(url, first), timeout=10)
+                            seg = fr.read()
+                            hls = [media.get('hlsSegmentFormat'), media.get('hlsVideoSegmentFormat')]
+                            mp = re.search(r'#EXT-X-MAP:URI="([^"]+)"', pl)
+                            if mp:  # fMP4: the player needs the init piece and media pieces, and must be told the format
+                                init = urllib.request.urlopen(urllib.parse.urljoin(url, mp.group(1)), timeout=10).read()
+                                info.update(hls=hls, init_ok=init[4:8] == b'ftyp', piece_ok=is_fmp4_piece(seg),
+                                            piece_type=fr.headers.get('Content-Type'))
+                                ok = info['init_ok'] and info['piece_ok'] and hls == ['fmp4', 'fmp4'] and not self.fail_load
+                            else:
+                                ok = seg[:1] == b'\x47' and hls[0] == 'ts' and not self.fail_load
                             info.update(segment_bytes=len(seg), ts_at_0=seg[:1] == b'\x47')
                         self.event(**info)
                         for tr_ in media.get('tracks') or []:

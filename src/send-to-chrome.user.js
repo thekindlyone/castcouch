@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Send to Chrome
 // @namespace    https://github.com/thekindlyone/castcouch
-// @version      4.6.0
+// @version      4.7.0
 // @description  anipm: opens the player in Chrome for Android, where it can be cast (Cast button). cinejoy: plays on the TV through the castcouch service on the home PC (castcouch button).
 // @match        *://anipm.pk/*
 // @match        *://*.anipm.pk/*
@@ -327,8 +327,8 @@ function relayCall(path, body, timeout = 10000) {
   }));
 }
 
-const FALLBACK_SERVER = 'Polaris'; // the cinejoy server whose streams play outside the site
-const MANUAL = `Open the player's Servers menu, pick ${FALLBACK_SERVER}, then tap castcouch again. (Settings → Playback → Server Order with ${FALLBACK_SERVER} first makes it the default.)`;
+const FALLBACK_SERVERS = ['Polaris', 'Nebula']; // cinejoy servers whose streams play outside the site, best first
+const MANUAL = `Open the player's Servers menu, pick ${FALLBACK_SERVERS.join(' or ')}, then tap castcouch again. (Settings → Playback → Server Order with ${FALLBACK_SERVERS[0]} first makes it the default.)`;
 const TV_ADVICE = { 'stream-refused': MANUAL, 'stream-unsupported': MANUAL, 'stream-unreachable': 'Try again in a moment.', 'switch-failed': MANUAL };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -343,6 +343,7 @@ async function switchServer(name) {
     const item = [...document.querySelectorAll('button,[role=menuitem],[role=option],li,div')].filter(e => (e.innerText || '').trim() === name).pop();
     if (item) { item.click(); return true; }
   }
+  menu.click(); // not offered for this film: close the menu again
   return false;
 }
 
@@ -410,15 +411,19 @@ async function playOnTv(restart = false) {
   const position = document.querySelector('video')?.currentTime || 0; // now: switching servers rewinds the player
   const subtitles = await pickedSubtitles();
   let r = await sendToTv(streams, position, subtitles);
-  // This server only plays inside the site: switch the player to the one that plays anywhere, then send that.
-  if (!r.ok && /^stream-(refused|unsupported)$/.test(r.code)) {
-    tvPanel({ busy: true, message: `That server won't play on the TV. Switching the player to ${FALLBACK_SERVER}…` });
-    const before = new Set(streams);
-    if (await switchServer(FALLBACK_SERVER) && await newStream(before, 20000)) {
-      tvPanel({ busy: true, message: `Sending ${FALLBACK_SERVER} to the TV…` });
+  // This server only plays inside the site: switch the player to one that plays anywhere, then send that.
+  // Not every film has every server, so each fallback is tried in turn.
+  const tried = [], firstError = r.message;
+  for (const name of FALLBACK_SERVERS) {
+    if (r.ok || !/^stream-(refused|unsupported)$|^switch-failed$/.test(r.code)) break;
+    tvPanel({ busy: true, message: `That server won't play on the TV. Switching the player to ${name}…` });
+    const before = new Set(streamsNow());
+    tried.push(name);
+    if (await switchServer(name) && await newStream(before, 20000)) {
+      tvPanel({ busy: true, message: `Sending ${name} to the TV…` });
       r = await sendToTv(streamsNow(), position, subtitles);
     } else {
-      r = { ok: false, code: 'switch-failed', message: `${r.message} Switching the player to ${FALLBACK_SERVER} by itself didn't work.` };
+      r = { ok: false, code: 'switch-failed', message: `${firstError} Switching the player to ${tried.join(', then ')} by itself didn't work.` };
     }
   }
   if (r.ok) pauseHere();

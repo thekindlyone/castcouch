@@ -48,13 +48,13 @@ ${q.get('overlay') ? '<div id="overlay" style="position:fixed;inset:0;z-index:21
 
 // A site that is its own player: full-window hls.js video that toggles on tap, like cinejoy.
 // ?ref=1: stream from the Referer-checking path (refused off-site), with a Servers menu whose "Polaris" switches
-// to the open path; ?noswitch=1 leaves the menu out; ?nostream=1: no video loaded yet; ?native=1: the <video> is given the playlist itself (native HLS); ?sub=1: a subtitle file is picked (fetched, as cinejoy does); ?sublist=1: only the subtitle list and votes are loaded.
+// to the open path; ?nopolaris=1 offers "Nebula" (open path) instead; ?noswitch=1 leaves the menu out; ?nostream=1: no video loaded yet; ?native=1: the <video> is given the playlist itself (native HLS); ?sub=1: a subtitle file is picked (fetched, as cinejoy does); ?sublist=1: only the subtitle list and votes are loaded.
 const pagePlayer = (player, q) => `<!doctype html><meta name=viewport content="width=device-width"><title>Watch</title><body style="margin:0;background:#000"><div id="box">
 <video muted autoplay loop playsinline style="position:fixed;inset:0;width:100%;height:100%;z-index:2147483647"></video></div>
 ${q.get('sublist') ? `<script>fetch('http://${player}/subtitles?type=movie&tmdb=12');fetch('http://${player}/votes/movie/12')</script>` : ''}
 ${q.get('sub') ? `<track kind="captions" label="English test" src="http://${player}/subs/en.srt"><script>fetch('http://${player}/subs/en.srt')</script>` : ''}
 ${q.get('noswitch') ? '' : `<button aria-label="Servers" onclick="menu.hidden=false" style="position:fixed;bottom:10px;left:10px;z-index:2147483647">S</button>
-<div id="menu" hidden style="position:fixed;bottom:50px;left:10px;z-index:2147483647;background:#fff"><div>Light</div><div onclick="h.loadSource('http://${player}/v1/object/v2.master.abc');menu.hidden=true">Polaris</div></div>`}<script src="http://${player}/hls.js"></script><script>
+<div id="menu" hidden style="position:fixed;bottom:50px;left:10px;z-index:2147483647;background:#fff"><div>Light</div><div onclick="h.loadSource('http://${player}/v1/object/v2.master.${q.get('nopolaris') ? 'neb' : 'abc'}');menu.hidden=true">${q.get('nopolaris') ? 'Nebula' : 'Polaris'}</div></div>`}<script src="http://${player}/hls.js"></script><script>
 const v=document.querySelector('video'),h=new Hls({enableWorker:false});${q.get('native') ? `v.src='http://${player}/v1/object/v2.master.abc';` : `${q.get('nostream') ? '' : `h.loadSource('http://${player}/${q.get('ref') ? 'ref/master.m3u8' : 'v1/object/v2.master.abc'}');`}h.attachMedia(v);`}
 document.addEventListener('dblclick',()=>box.requestFullscreen());
 document.addEventListener('click',()=>v.paused?v.play():v.pause());</script>`;
@@ -79,7 +79,7 @@ export function start({ sitePort = 8001, playerPort = 8002, bind = '127.0.0.1', 
     if (u.pathname === '/votes/movie/12') return send(res, 200, 'application/json', JSON.stringify({ votes: { f: { up: 50, down: 0 }, o: { up: 1, down: 0 }, b: { up: 4, down: 1 } } }));
     if (u.pathname === '/subs/en.srt') return send(res, 200, 'text/plain; charset=utf-8', '1\r\n00:00:01,000 --> 00:00:04,000\r\n<i>Hello from the harness</i>\r\n');
     if (u.pathname === '/hls.js') return send(res, 200, 'text/javascript', fs.readFileSync(path.join(root, 'node_modules/hls.js/dist/hls.min.js')));
-    const m = u.pathname.match(/^\/(v1\/object|ref)\/(v2\.master\.abc|master\.m3u8|v3\.out\d+\.ts)$/);
+    const m = u.pathname.match(/^\/(v1\/object|ref)\/(v2\.master\.(?:abc|neb)|master\.m3u8|v3\.out\d+\.ts)$/);
     if (!m) return send(res, 404, 'text/plain', 'not found');
     if (m[1] === 'ref' && !req.headers.referer) return send(res, 403, 'text/plain', 'Referer required');
     if (m[2].startsWith('v2') || m[2] === 'master.m3u8') return send(res, 200, 'application/vnd.apple.mpegurl', fs.readFileSync(path.join(media, 'out.m3u8'), 'utf8').replace(/^out/gm, 'v3.out'));
